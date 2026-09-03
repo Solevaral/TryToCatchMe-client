@@ -1,0 +1,51 @@
+[
+  {
+    "id": "cloudflare",
+    "name": "Cloudflare",
+    "icon": "☁️",
+    "domains": ["cloudflare.com", "cloudflare-dns.com", "cloudflareinsights.com", "cf-ipfs.com"],
+    "ip_cidrs": ["1.1.1.1/32", "1.0.0.1/32"]
+  },
+  {
+    "id": "google",
+    "name": "Google",
+    "icon": "🔍",
+    "domains": ["google.com", "googleapis.com", "gstatic.com", "googleusercontent.com", "ggpht.com", "google-analytics.com", "withgoogle.com"],
+    "ip_cidrs": []
+  },
+  {
+    "id": "youtube",
+    "name": "YouTube",
+    "icon": "▶️",
+    "domains": ["youtube.com", "youtu.be", "ytimg.com", "googlevideo.com", "youtube-nocookie.com"],
+    "ip_cidrs": []
+  },
+  {
+    "id": "telegram",
+    "name": "Telegram",
+    "icon": "✈️",
+    "domains": ["telegram.org", "t.me", "telegram.me", "telesco.pe", "cdn-telegram.org"],
+    "ip_cidrs": ["91.108.4.0/22", "91.108.8.0/22", "91.108.12.0/22", "91.108.16.0/22", "91.108.56.0/22", "149.154.160.0/20"]
+  },
+  {
+    "id": "netflix",
+    "name": "Netflix",
+    "icon": "🎬",
+    "domains": ["netflix.com", "nflxvideo.net", "nflximg.net", "nflxext.com", "nflxso.net"],
+    "ip_cidrs": []
+  },
+  {
+    "id": "steam",
+    "name": "Steam",
+    "icon": "🎮",
+    "domains": ["steampowered.com", "steamcommunity.com", "steamstatic.com", "steamcontent.com", "steamgames.com", "valvesoftware.com"],
+    "ip_cidrs": []
+  },
+  {
+    "id": "discord",
+    "name": "Discord",
+    "icon": "💬",
+    "domains": ["discord.com", "discord.gg", "discordapp.com", "discordapp.net", "discord.media"],
+    "ip_cidrs": []
+  }
+]

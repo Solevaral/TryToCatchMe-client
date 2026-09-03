@@ -1,0 +1,6 @@
+# Build config for the MinGW (GNU) toolchain, using the MSYS2 gcc already on this machine.
+[target.x86_64-pc-windows-gnu]
+linker = "C:\\msys64\\mingw64\\bin\\gcc.exe"
+ar = "C:\\msys64\\mingw64\\bin\\ar.exe"
+# Statically link libgcc / winpthread so the produced .exe has no MinGW DLL runtime deps.
+rustflags = ["-C", "link-args=-static-libgcc -Wl,-Bstatic,-lwinpthread,-Bdynamic"]

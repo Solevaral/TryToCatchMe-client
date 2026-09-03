@@ -1,0 +1,13 @@
+[package]
+name = "ttcm-core"
+version = "0.1.0"
+edition = "2021"
+description = "Pure, platform-independent core logic for TryToCatchMe (link parsing, config generation)"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+base64 = "0.22"
+url = "2"
+uuid = { version = "1", features = ["v4"] }
+percent-encoding = "2"

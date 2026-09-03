@@ -1,0 +1,21 @@
+# Node / frontend
+node_modules
+dist
+dist-ssr
+*.local
+
+# Rust / Tauri
+src-tauri/target
+src-tauri/gen/schemas
+
+# Large external binaries (fetched via scripts/fetch-core.ps1 / fetch-core.sh)
+src-tauri/binaries/sing-box.exe
+src-tauri/binaries/sing-box
+src-tauri/binaries/wintun.dll
+
+# Editor / OS
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+Thumbs.db

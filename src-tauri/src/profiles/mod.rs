@@ -159,6 +159,15 @@ impl ProfileStore {
         Some((p.server.clone(), p.port))
     }
 
+    /// A specific profile's outbound with the given tag (for services pinned to it).
+    pub fn outbound_of(&self, id: &str, tag: &str) -> Option<Value> {
+        let g = self.inner.lock();
+        let p = g.profiles.iter().find(|p| p.id == id)?;
+        let mut ob = p.outbound.clone();
+        ob["tag"] = Value::from(tag);
+        Some(ob)
+    }
+
     /// The active profile's outbound with `tag: "proxy"` set, ready for the config.
     pub fn active_outbound(&self) -> Option<Value> {
         let g = self.inner.lock();

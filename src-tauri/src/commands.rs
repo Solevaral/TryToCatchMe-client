@@ -172,16 +172,21 @@ pub async fn geo_refresh(app: AppHandle) -> GeoRefreshResult {
         let _ = app.emit(if ok { "app://log" } else { "app://error" }, message.clone());
         GeoRefreshResult { ok, message }
     };
-    let Some(region) = app.state::<RoutingStore>().geo_region() else {
-        return result(false, "Регион не выбран (нужен режим «Rule» и отмеченный регион)".into());
-    };
+    let files = app.state::<RoutingStore>().plan().files();
+    if files.is_empty() {
+        return result(
+            false,
+            "Нечего обновлять: нет выбранного региона и включённых сервисов с полным списком доменов (нужен режим «Rule»)".into(),
+        );
+    }
     let running = app.state::<CoreState>().status().running;
     let has_proxy = app.state::<ProfileStore>().active_outbound().is_some();
     let vpn_port = (running && has_proxy).then(|| app.state::<SettingsStore>().get().proxy_port);
-    let had_old = crate::geo::ready_dir(&app, &region).is_some();
+    let had_old = crate::geo::all_present(&app, &files);
 
-    match crate::geo::download(&app, &region, vpn_port).await {
+    match crate::geo::download(&app, &files, vpn_port).await {
         Ok(how) if running => {
+            let how = format!("{} шт., {how}", files.len());
             app.state::<ClashStreams>().stop();
             match run_core(&app, |a| a.state::<CoreState>().restart(a)).await {
                 Ok(()) => {
@@ -191,7 +196,7 @@ pub async fn geo_refresh(app: AppHandle) -> GeoRefreshResult {
                 Err(e) => result(false, format!("Списки скачаны ({how}), но перезапустить туннель не удалось: {e}")),
             }
         }
-        Ok(how) => result(true, format!("Списки скачаны ({how}) — применятся при подключении")),
+        Ok(how) => result(true, format!("Списки скачаны ({} шт., {how}) — применятся при подключении", files.len())),
         Err(e) => {
             let mut msg = format!("Не удалось скачать списки: {e}.");
             if had_old {
@@ -271,10 +276,22 @@ pub async fn diag_run(app: AppHandle, targets: Option<Vec<String>>) -> DiagRepor
         core_running,
         targets,
     };
-    tauri::async_runtime::spawn_blocking(move || diag::run(input))
+    let mut report = tauri::async_runtime::spawn_blocking(move || diag::run(input))
         .await
         .unwrap_or(DiagReport {
             steps: vec![],
             verdict: "Не удалось запустить диагностику".to_string(),
-        })
+        });
+    // Through the active profile: exit IP, the country Google sees, AI service regions.
+    if core_running && app.state::<ProfileStore>().active_outbound().is_some() {
+        let port = app.state::<SettingsStore>().get().proxy_port;
+        let extra = diag::service_checks(port).await;
+        if report.verdict == "Всё в порядке" {
+            if let Some(bad) = extra.iter().find(|s| s.status == "fail") {
+                report.verdict = format!("Туннель работает, но: {} — {}", bad.label, bad.detail);
+            }
+        }
+        report.steps.extend(extra);
+    }
+    report
 }

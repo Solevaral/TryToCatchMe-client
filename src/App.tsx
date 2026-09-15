@@ -34,7 +34,7 @@ function fmtSpeed(bytesPerSec: number): string {
 }
 
 export default function App() {
-  const { page, setPage, status, setStatus, up, down, setTraffic, lastError, setLastError } = useAppStore();
+  const { page, setPage, status, setStatus, up, down, setTraffic, lastError, setLastError, warm, setWarm } = useAppStore();
 
   // Sync status from the core at startup (window may have been reopened from tray).
   useEffect(() => {
@@ -59,6 +59,12 @@ export default function App() {
           s === "connected" ? "connected" : s === "error" ? "error" : s === "connecting" ? "connecting" : "disconnected"
         );
         if (s === "connected" || s === "idle") setLastError(null);
+      })
+    );
+    // Tunnel warm-up right after connecting (the first request can take seconds).
+    unlisteners.push(
+      listen<string>("vpn://warm", (e) => {
+        setWarm(e.payload === "start" ? "warming" : e.payload === "fail" ? "fail" : "");
       })
     );
     // Step-by-step progress of connecting (profile, capture mode, config, core start).
@@ -127,7 +133,7 @@ export default function App() {
     return () => {
       unlisteners.forEach((p) => p.then((un) => un()).catch(() => {}));
     };
-  }, [setStatus, setPage, setTraffic, setLastError]);
+  }, [setStatus, setPage, setTraffic, setLastError, setWarm]);
 
   const dotClass =
     status === "connected"
@@ -175,6 +181,18 @@ export default function App() {
               }}
             >
               {lastError}
+            </div>
+          )}
+          {status === "connected" && warm === "warming" && (
+            <div style={{ fontSize: 11, marginTop: 6, color: "var(--warn)" }}>Прогрев туннеля…</div>
+          )}
+          {status === "connected" && warm === "fail" && (
+            <div
+              style={{ fontSize: 11, marginTop: 6, color: "var(--err)", cursor: "pointer" }}
+              onClick={() => setPage("diagnostics")}
+              title="Открыть диагностику"
+            >
+              Трафик через сервер не проходит — проверьте профиль
             </div>
           )}
           <SysProxyLine connected={status === "connected"} />

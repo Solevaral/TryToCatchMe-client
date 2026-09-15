@@ -27,6 +27,10 @@ interface AppState {
   // human-readable reason of the last connection failure (shown under the status)
   lastError: string | null;
   setLastError: (e: string | null) => void;
+
+  // tunnel warm-up after connecting: "" | "warming" | "fail"
+  warm: string;
+  setWarm: (w: string) => void;
 }
 
 export const useAppStore = create<AppState>((set) => ({
@@ -45,4 +49,7 @@ export const useAppStore = create<AppState>((set) => ({
 
   lastError: null,
   setLastError: (lastError) => set({ lastError }),
+
+  warm: "",
+  setWarm: (warm) => set({ warm }),
 }));

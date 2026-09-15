@@ -34,7 +34,7 @@ export default function SysProxyLine({ connected }: { connected: boolean }) {
   if (st.applied_port === null) {
     return (
       <div className="muted" style={{ fontSize: 11, marginTop: 6 }}>
-        Системный прокси не используется (режим TUN)
+        Системный прокси не настроен приложением — см. логи
       </div>
     );
   }

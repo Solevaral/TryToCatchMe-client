@@ -221,8 +221,13 @@ fn run_quiet(cmd: &mut Command) -> bool {
 
 /// Ask the Clash API to time a request through the active proxy outbound.
 pub fn clash_delay(test_url: &str, timeout_ms: u64) -> Option<u64> {
+    clash_delay_via("proxy", test_url, timeout_ms)
+}
+
+/// Same, through a specific outbound tag (e.g. a profile a service is pinned to).
+pub fn clash_delay_via(tag: &str, test_url: &str, timeout_ms: u64) -> Option<u64> {
     let enc = test_url.replace(':', "%3A").replace('/', "%2F");
-    let path = format!("/proxies/proxy/delay?timeout={timeout_ms}&url={enc}");
+    let path = format!("/proxies/{tag}/delay?timeout={timeout_ms}&url={enc}");
     let body = http_get_localhost(CLASH_CONTROLLER, &path, timeout_ms + 1000)?;
     // Response: {"delay": 123} on success; {"message": "..."} on failure.
     let v: serde_json::Value = serde_json::from_str(&body).ok()?;
@@ -287,4 +292,95 @@ fn default_gateway() -> Option<(String, String)> {
     let out = Command::new("ip").args(["route", "show", "default"]).output().ok()?;
     let routes = parse_linux_routes(&String::from_utf8_lossy(&out.stdout));
     pick_gateway(&routes).map(|r| (r.gateway.clone(), adapter_suffix(r)))
+}
+
+// ---------------------------------------------------------------------------
+// Service availability through the active profile (async)
+// ---------------------------------------------------------------------------
+
+/// Countries where Gemini isn't offered: if Google geolocates the VPN exit here, Gemini
+/// shows "not available in your country".
+const GEMINI_BLOCKED: [&str; 9] = ["RU", "BY", "CN", "HK", "MO", "IR", "KP", "CU", "SY"];
+
+async fn get_via(client: &reqwest::Client, url: &str) -> Result<(u16, String), String> {
+    let resp = client.get(url).send().await.map_err(|e| crate::geo::describe_reqwest(&e))?;
+    let code = resp.status().as_u16();
+    let body = resp.text().await.unwrap_or_default();
+    Ok((code, body))
+}
+
+/// Exit IP, the country Google assigns to it, and whether AI services accept it —
+/// all forced through the active profile (the internal geo inbound always uses it).
+pub async fn service_checks(proxy_port: u16) -> Vec<DiagStep> {
+    let mut steps = Vec::new();
+    let listen = crate::config::MIXED_LISTEN;
+    // `active`: the internal inbound, always the active profile. `routed`: the normal
+    // local proxy, so each service goes exactly where routing sends it (a service
+    // pinned to another server is checked through that server).
+    let make = |port: u16| {
+        reqwest::Proxy::all(format!("http://{listen}:{port}")).and_then(|p| {
+            reqwest::Client::builder()
+                .proxy(p)
+                .connect_timeout(Duration::from_secs(10))
+                .timeout(Duration::from_secs(20))
+                .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126 Safari/537.36")
+                .build()
+        })
+    };
+    let (active, routed) = match (make(crate::config::geo_port(proxy_port)), make(proxy_port)) {
+        (Ok(a), Ok(r)) => (a, r),
+        (Err(e), _) | (_, Err(e)) => {
+            steps.push(step("svc", "Сервисы через VPN", "skip", format!("не удалось создать клиент: {e}"), None));
+            return steps;
+        }
+    };
+
+    // 1. Exit IP of the active profile.
+    let t = Instant::now();
+    match get_via(&active, "https://api.ipify.org").await {
+        Ok((200, ip)) => steps.push(step("exit-ip", "IP выхода (активный профиль)", "ok", ip.trim().to_string(), Some(t.elapsed().as_millis() as u64))),
+        Ok((code, _)) => steps.push(step("exit-ip", "IP выхода (активный профиль)", "warn", format!("сервис ответил {code}"), None)),
+        Err(e) => steps.push(step("exit-ip", "IP выхода (активный профиль)", "fail", format!("запрос через VPN не прошёл: {e}"), None)),
+    }
+
+    // 2. Country according to Google, along the Google route (www.google.com links
+    //    carry it as utm_source=google-XX).
+    let t = Instant::now();
+    let label = "Страна по мнению Google (Google + Gemini)";
+    match get_via(&routed, "https://www.google.com/?hl=en").await {
+        Ok((_, body)) => match body.split("utm_source=google-").nth(1).and_then(|r| r.get(..2)).filter(|cc| cc.chars().all(|c| c.is_ascii_uppercase())) {
+            Some(cc) if GEMINI_BLOCKED.contains(&cc) => steps.push(step(
+                "google-country",
+                label,
+                "fail",
+                format!("{cc} — Gemini покажет «недоступно в вашей стране». Закрепите сервис «Google + Gemini» за профилем, у которого Google видит другую страну (Маршрутизация → Google + Gemini → сервер)."),
+                Some(t.elapsed().as_millis() as u64),
+            )),
+            Some(cc) => steps.push(step("google-country", label, "ok", format!("{cc} — Gemini доступен"), Some(t.elapsed().as_millis() as u64))),
+            None => steps.push(step("google-country", label, "warn", "не удалось определить", None)),
+        },
+        Err(e) => steps.push(step("google-country", label, "fail", format!("Google не открывается: {e}"), None)),
+    }
+
+    // 3/4. AI APIs: 401 = reachable and region allowed (just no key); 403 = region blocked.
+    for (id, label, url) in [
+        ("claude", "Claude (Anthropic API)", "https://api.anthropic.com/v1/models"),
+        ("openai", "ChatGPT (OpenAI API)", "https://api.openai.com/v1/models"),
+    ] {
+        let t = Instant::now();
+        let ms = || Some(t.elapsed().as_millis() as u64);
+        match get_via(&routed, url).await {
+            Ok((401, _)) | Ok((200, _)) => steps.push(step(id, label, "ok", "доступен из этой страны", ms())),
+            Ok((403, body)) => steps.push(step(
+                id,
+                label,
+                "fail",
+                format!("регион этого IP заблокирован сервисом{}", if body.contains("country") || body.contains("region") { "" } else { " (403)" }),
+                ms(),
+            )),
+            Ok((code, _)) => steps.push(step(id, label, "warn", format!("ответ {code}"), ms())),
+            Err(e) => steps.push(step(id, label, "fail", format!("не открывается через VPN: {e}"), None)),
+        }
+    }
+    steps
 }

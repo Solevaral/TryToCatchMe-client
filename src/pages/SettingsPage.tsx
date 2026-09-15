@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { enable, disable, isEnabled } from "@tauri-apps/plugin-autostart";
+import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import {
   getVersion,
   settingsGet,
@@ -29,6 +30,26 @@ export default function SettingsPage() {
       }
     } catch (e) {
       console.error(e);
+    }
+  }
+
+  const [copied, setCopied] = useState<string>("");
+
+  async function copyEnv(kind: "ps" | "cmd" | "sh") {
+    if (!settings) return;
+    const url = `http://127.0.0.1:${settings.proxy_port}`;
+    const text =
+      kind === "ps"
+        ? `$env:HTTP_PROXY="${url}"; $env:HTTPS_PROXY="${url}"; $env:NO_PROXY="localhost,127.0.0.1"`
+        : kind === "cmd"
+        ? `set HTTP_PROXY=${url}\nset HTTPS_PROXY=${url}\nset NO_PROXY=localhost,127.0.0.1`
+        : `export HTTP_PROXY=${url} HTTPS_PROXY=${url} NO_PROXY=localhost,127.0.0.1`;
+    try {
+      await writeText(text);
+      setCopied(kind);
+      setTimeout(() => setCopied(""), 1500);
+    } catch {
+      /* ignore */
     }
   }
 
@@ -109,6 +130,17 @@ export default function SettingsPage() {
               При подключении приложение запоминает твои настройки прокси и направляет системный
               прокси на этот порт; при отключении (и после аварийного завершения) возвращает их
               обратно. Порт + 1 занят служебной загрузкой гео-списков.
+            </div>
+            <div style={{ marginTop: 12, fontWeight: 550 }}>Программы, которые игнорируют системный прокси</div>
+            <div className="muted" style={{ fontSize: 12, margin: "4px 0 8px" }}>
+              Консольные утилиты (например Claude Code, git, npm) и часть приложений не читают
+              системный прокси. Либо включите TUN, либо задайте им переменные окружения —
+              скопируйте и выполните в терминале перед запуском программы:
+            </div>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              <button className="btn" onClick={() => copyEnv("ps")}>{copied === "ps" ? "Скопировано ✓" : "PowerShell"}</button>
+              <button className="btn" onClick={() => copyEnv("cmd")}>{copied === "cmd" ? "Скопировано ✓" : "cmd"}</button>
+              <button className="btn" onClick={() => copyEnv("sh")}>{copied === "sh" ? "Скопировано ✓" : "bash / zsh"}</button>
             </div>
           </>
         ) : (

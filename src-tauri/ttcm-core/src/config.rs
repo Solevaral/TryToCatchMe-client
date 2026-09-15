@@ -24,6 +24,8 @@ pub struct GenOptions {
     pub mixed_port: u16,
     /// The active proxy outbound (tag=proxy). `None` => direct-only.
     pub proxy_outbound: Option<Value>,
+    /// Extra outbounds for services pinned to other profiles (tags `via-<profile id>`).
+    pub extra_outbounds: Vec<Value>,
     pub log_level: String,
     /// sing-box `route.rules` (built by the routing layer).
     pub route_rules: Vec<Value>,
@@ -45,6 +47,7 @@ impl Default for GenOptions {
         Self {
             mixed_port: MIXED_PORT,
             proxy_outbound: None,
+            extra_outbounds: Vec::new(),
             log_level: "info".to_string(),
             route_rules: Vec::new(),
             rule_sets: Vec::new(),
@@ -69,12 +72,33 @@ pub fn generate(opts: &GenOptions) -> Value {
     let mut outbounds = vec![json!({ "type": "direct", "tag": "direct" })];
     if let Some(proxy) = &opts.proxy_outbound {
         outbounds.push(proxy.clone());
+        outbounds.extend(opts.extra_outbounds.iter().cloned());
     }
+    let extra_tags: Vec<String> = if has_proxy {
+        opts.extra_outbounds
+            .iter()
+            .filter_map(|o| o["tag"].as_str().map(str::to_string))
+            .collect()
+    } else {
+        Vec::new()
+    };
 
     // Without an active proxy, everything is direct and no proxy-targeted rules apply.
+    // Rules pointing at a pinned profile that isn't available fall back to the proxy.
+    let known = |tag: &str| tag == "proxy" || extra_tags.iter().any(|t| t == tag);
     let (user_rules, rule_sets, final_tag): (Vec<Value>, Vec<Value>, String) = if has_proxy {
         (
-            opts.route_rules.clone(),
+            opts.route_rules
+                .iter()
+                .map(|r| match r["outbound"].as_str() {
+                    Some(t) if t.starts_with("via-") && !known(t) => {
+                        let mut r = r.clone();
+                        r["outbound"] = json!("proxy");
+                        r
+                    }
+                    _ => r.clone(),
+                })
+                .collect(),
             opts.rule_sets.clone(),
             match opts.final_action.as_str() {
                 "direct" => "direct".to_string(),
@@ -177,15 +201,40 @@ pub fn generate(opts: &GenOptions) -> Value {
         servers.push(json!({
             "type": "https", "tag": "doh-proxy", "server": "1.1.1.1", "detour": "proxy"
         }));
-        for rule in user_rules.iter().filter(|r| r.get("outbound") == Some(&json!("proxy"))) {
+        // Pinned profiles resolve through their own tunnel, too.
+        for tag in &extra_tags {
+            servers.push(json!({
+                "type": "https", "tag": format!("doh-{tag}"), "server": "1.1.1.1", "detour": tag
+            }));
+        }
+        for rule in &user_rules {
+            let server = match rule.get("outbound").and_then(|o| o.as_str()) {
+                Some("proxy") => "doh-proxy".to_string(),
+                Some(t) if extra_tags.iter().any(|e| e == t) => format!("doh-{t}"),
+                // Direct rules still take their DNS slot in order, or a narrower direct
+                // service would resolve through a broader proxied one.
+                Some("direct") => "dns-direct".to_string(),
+                _ => continue,
+            };
             let mut dns_rule = serde_json::Map::new();
             for key in DOMAIN_KEYS {
                 if let Some(v) = rule.get(key) {
                     dns_rule.insert(key.into(), v.clone());
                 }
             }
+            // Domain lists (geosite) can drive DNS too; IP lists (geoip) can't.
+            if let Some(sets) = rule.get("rule_set").and_then(|v| v.as_array()) {
+                let domain_sets: Vec<Value> = sets
+                    .iter()
+                    .filter(|t| t.as_str().map(|t| t.contains("geosite")).unwrap_or(false))
+                    .cloned()
+                    .collect();
+                if !domain_sets.is_empty() {
+                    dns_rule.insert("rule_set".into(), json!(domain_sets));
+                }
+            }
             if !dns_rule.is_empty() {
-                dns_rule.insert("server".into(), json!("doh-proxy"));
+                dns_rule.insert("server".into(), json!(server));
                 dns_rules.push(Value::Object(dns_rule));
             }
         }
@@ -270,6 +319,30 @@ mod tests {
         assert!(inbounds.iter().any(|i| i["tag"] == "geo-in" && i["listen_port"] == 3001));
         let rules = cfg["route"]["rules"].as_array().unwrap();
         assert!(rules.iter().any(|r| r["inbound"][0] == "geo-in" && r["outbound"] == "proxy"));
+    }
+
+    #[test]
+    fn pinned_profile_gets_outbound_and_its_own_dns() {
+        let mut via = proxy();
+        via["tag"] = json!("via-p2");
+        let cfg = generate(&GenOptions {
+            extra_outbounds: vec![via],
+            route_rules: vec![
+                json!({ "domain_suffix": ["gemini.google.com"], "outbound": "via-p2" }),
+                json!({ "domain_suffix": ["x.com"], "outbound": "via-gone" }),
+            ],
+            final_action: "direct".into(),
+            ..only_youtube()
+        });
+        let tags: Vec<&str> = cfg["outbounds"].as_array().unwrap().iter().filter_map(|o| o["tag"].as_str()).collect();
+        assert!(tags.contains(&"via-p2"));
+        let rules = cfg["route"]["rules"].as_array().unwrap();
+        // unknown pinned profile falls back to the active proxy
+        assert!(rules.iter().any(|r| r["domain_suffix"][0] == "x.com" && r["outbound"] == "proxy"));
+        let servers = cfg["dns"]["servers"].as_array().unwrap();
+        assert!(servers.iter().any(|s| s["tag"] == "doh-via-p2" && s["detour"] == "via-p2"));
+        let dns_rules = cfg["dns"]["rules"].as_array().unwrap();
+        assert!(dns_rules.iter().any(|r| r["domain_suffix"][0] == "gemini.google.com" && r["server"] == "doh-via-p2"));
     }
 
     #[test]

@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use tauri::{AppHandle, Manager};
 use ttcm_core::config::{geo_port, MIXED_LISTEN};
-use ttcm_core::routing::geo_files;
+use ttcm_core::routing::GeoFile;
 
 /// sing-box binary rule-set magic: "SRS" + format version.
 const SRS_MAGIC: &[u8] = b"SRS";
@@ -26,19 +26,21 @@ pub fn dir(app: &AppHandle) -> Option<PathBuf> {
     app.path().app_config_dir().ok().map(|d| d.join("rules"))
 }
 
-/// The rules folder if every file for `region` is present (usable by the core).
-pub fn ready_dir(app: &AppHandle, region: &str) -> Option<String> {
-    let d = dir(app)?;
-    let all = geo_files(region).iter().all(|f| {
-        fs::metadata(d.join(&f.file_name)).map(|m| m.len() > 0).unwrap_or(false)
-    });
-    all.then(|| d.to_string_lossy().to_string())
+pub fn present(app: &AppHandle, file: &GeoFile) -> bool {
+    dir(app)
+        .and_then(|d| fs::metadata(d.join(&file.file_name)).ok())
+        .map(|m| m.len() > 0)
+        .unwrap_or(false)
 }
 
-/// Age of the oldest file for `region`, if all are present.
-pub fn age(app: &AppHandle, region: &str) -> Option<Duration> {
+pub fn all_present(app: &AppHandle, files: &[GeoFile]) -> bool {
+    !files.is_empty() && files.iter().all(|f| present(app, f))
+}
+
+/// Age of the oldest of `files`, if all are present.
+pub fn oldest_age(app: &AppHandle, files: &[GeoFile]) -> Option<Duration> {
     let d = dir(app)?;
-    geo_files(region)
+    files
         .iter()
         .map(|f| fs::metadata(d.join(&f.file_name)).ok()?.modified().ok()?.elapsed().ok())
         .collect::<Option<Vec<_>>>()?
@@ -46,11 +48,11 @@ pub fn age(app: &AppHandle, region: &str) -> Option<Duration> {
         .max()
 }
 
-/// Remove the region's files (e.g. when sing-box reports them as corrupt).
-pub fn remove(app: &AppHandle, region: &str) {
+/// Remove files (e.g. when sing-box reports them as corrupt).
+pub fn remove(app: &AppHandle, files: &[GeoFile]) {
     if let Some(d) = dir(app) {
-        for f in geo_files(region) {
-            let _ = fs::remove_file(d.join(f.file_name));
+        for f in files {
+            let _ = fs::remove_file(d.join(&f.file_name));
         }
     }
 }
@@ -76,7 +78,7 @@ async fn fetch(url: &str, proxy: Option<&str>) -> Result<Vec<u8>, String> {
     Ok(body.to_vec())
 }
 
-fn describe_reqwest(e: &reqwest::Error) -> String {
+pub fn describe_reqwest(e: &reqwest::Error) -> String {
     if e.is_timeout() {
         "таймаут".into()
     } else if e.is_connect() {
@@ -94,21 +96,23 @@ fn describe_reqwest(e: &reqwest::Error) -> String {
     }
 }
 
-/// Download all files for `region`. `vpn_port` = the local proxy port while connected
-/// (downloads then go through the VPN first). Returns how it was downloaded.
-pub async fn download(app: &AppHandle, region: &str, vpn_port: Option<u16>) -> Result<String, String> {
+/// Download `files`. `vpn_port` = the local proxy port while connected (downloads then
+/// go through the VPN first). Returns how they were downloaded.
+pub async fn download(app: &AppHandle, files: &[GeoFile], vpn_port: Option<u16>) -> Result<String, String> {
+    if files.is_empty() {
+        return Err("нечего скачивать".into());
+    }
     if BUSY.swap(true, Ordering::SeqCst) {
         return Err("списки уже скачиваются".into());
     }
-    let result = download_inner(app, region, vpn_port).await;
+    let result = download_inner(app, files, vpn_port).await;
     BUSY.store(false, Ordering::SeqCst);
     result
 }
 
-async fn download_inner(app: &AppHandle, region: &str, vpn_port: Option<u16>) -> Result<String, String> {
+async fn download_inner(app: &AppHandle, files: &[GeoFile], vpn_port: Option<u16>) -> Result<String, String> {
     let dir = dir(app).ok_or("нет папки настроек")?;
     fs::create_dir_all(&dir).map_err(|e| format!("не удалось создать папку списков: {e}"))?;
-    let files = geo_files(region);
 
     let mut attempts: Vec<(&str, Option<String>)> = Vec::new();
     if let Some(port) = vpn_port {
@@ -119,7 +123,7 @@ async fn download_inner(app: &AppHandle, region: &str, vpn_port: Option<u16>) ->
     let mut errors = Vec::new();
     'attempt: for (label, proxy) in attempts {
         let mut fetched = Vec::new();
-        for f in &files {
+        for f in files {
             match fetch(&f.url, proxy.as_deref()).await {
                 Ok(bytes) => fetched.push((f, bytes)),
                 Err(e) => {

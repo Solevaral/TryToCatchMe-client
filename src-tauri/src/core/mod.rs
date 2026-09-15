@@ -22,6 +22,7 @@ use crate::config::{self, geo_port, GenOptions, CLASH_CONTROLLER, MIXED_LISTEN};
 use crate::sysproxy::SysProxyState;
 use crate::profiles::ProfileStore;
 use crate::routing::RoutingStore;
+use ttcm_core::routing::{profile_tag, service_geo_file, GeoFile, GeoInput};
 
 #[derive(Default)]
 pub struct CoreState {
@@ -93,21 +94,71 @@ impl CoreState {
         let tun = settings.capture_tun;
         let port = settings.proxy_port;
 
-        // Geo lists are local files the app downloads itself; without them the geo
-        // rule is simply left out (and they get downloaded after connecting).
+        // Geo lists (region + lists backing services) are local files the app downloads
+        // itself; missing ones are simply left out and downloaded after connecting.
         let routing = app.state::<RoutingStore>();
-        let region = routing.geo_region();
-        let geo_dir = region.as_deref().and_then(|r| crate::geo::ready_dir(app, r));
-        if let Some(r) = &region {
-            match &geo_dir {
-                Some(_) => app_log(app, format!("Гео-списки «{r}»: загружены")),
-                None => app_log(
+        let plan = routing.plan();
+        let geo_files = plan.files();
+        let geo_dir = crate::geo::dir(app).map(|d| d.to_string_lossy().to_string()).unwrap_or_default();
+        let region_ready = crate::geo::all_present(app, &plan.region_files());
+        let service_ready: Vec<String> = plan
+            .service_geosites
+            .iter()
+            .filter(|n| crate::geo::present(app, &service_geo_file(n)))
+            .cloned()
+            .collect();
+        let missing: Vec<String> = geo_files
+            .iter()
+            .filter(|f| !crate::geo::present(app, f))
+            .map(|f| f.file_name.clone())
+            .collect();
+        if !geo_files.is_empty() {
+            if missing.is_empty() {
+                app_log(app, format!("Гео-списки: загружены ({} шт.)", geo_files.len()));
+            } else {
+                app_log(
                     app,
-                    format!("Гео-списки «{r}» ещё не скачаны — подключаюсь без них и скачаю после подключения"),
+                    format!("Гео-списки ещё не скачаны ({}) — подключаюсь без них и скачаю после подключения", missing.join(", ")),
+                );
+            }
+        }
+        let geo_input = GeoInput { dir: &geo_dir, region_ready, geosites: &service_ready };
+        let spec = routing.route_spec(Some(&geo_input));
+
+        // Services pinned to other profiles get their own outbounds.
+        let active_id = profiles.active_id();
+        let mut extra_outbounds = Vec::new();
+        for pid in &plan.pinned_profiles {
+            if Some(pid) == active_id.as_ref() {
+                continue; // same server as the active profile: the rule falls back to it
+            }
+            match profiles.outbound_of(pid, &profile_tag(pid)) {
+                Some(ob) => {
+                    app_log(
+                        app,
+                        format!("Отдельный сервер для сервиса: «{}»", profiles.name_of(pid).unwrap_or_default()),
+                    );
+                    extra_outbounds.push(ob);
+                }
+                None => app_error(
+                    app,
+                    "Сервис закреплён за удалённым профилем — он пойдёт через активный профиль".to_string(),
                 ),
             }
         }
-        let spec = routing.route_spec(geo_dir.as_deref());
+
+        // Another VPN client fights over the system proxy / routes; tests "through
+        // TryToCatchMe" then silently go through it.
+        let others = crate::platform::running_vpn_clients();
+        if !others.is_empty() {
+            app_error(
+                app,
+                format!(
+                    "Запущен другой VPN-клиент: {}. Он может перехватывать системный прокси и маршруты — трафик пойдёт через него. Для корректной работы закройте его.",
+                    others.join(", ")
+                ),
+            );
+        }
         app_log(
             app,
             format!(
@@ -142,6 +193,7 @@ impl CoreState {
         let options = |route_rules: Vec<serde_json::Value>, rule_sets: Vec<serde_json::Value>| GenOptions {
             mixed_port: port,
             proxy_outbound: proxy_outbound.clone(),
+            extra_outbounds: extra_outbounds.clone(),
             route_rules,
             rule_sets,
             final_action: spec.final_action.clone(),
@@ -166,16 +218,14 @@ impl CoreState {
             self.spawn_and_wait(app, &bin, &work_dir, &cfg_path)
         };
 
-        let mut geo_missing = geo_dir.is_none();
+        let mut geo_missing = !missing.is_empty();
         match check_and_spawn() {
             Ok(()) => {}
-            Err(e) if geo_dir.is_some() && e.to_lowercase().contains("rule-set") => {
-                // A downloaded list is unreadable (check or run rejected it): drop it,
-                // run without geo, and re-download after connecting.
+            Err(e) if !spec.rule_sets.is_empty() && e.to_lowercase().contains("rule-set") => {
+                // A downloaded list is unreadable (check or run rejected it): drop the
+                // lists, run without them, and re-download after connecting.
                 app_error(app, format!("Сохранённые гео-списки повреждены — удаляю и запускаюсь без них ({e})"));
-                if let Some(r) = &region {
-                    crate::geo::remove(app, r);
-                }
+                crate::geo::remove(app, &geo_files);
                 let rules = spec.rules.iter().filter(|r| r.get("rule_set").is_none()).cloned().collect();
                 write_cfg(&options(rules, Vec::new()))?;
                 check_and_spawn()?;
@@ -199,8 +249,15 @@ impl CoreState {
             }
         }
 
-        if let Some(r) = region {
-            schedule_geo(app, r, proxy_outbound.is_some().then_some(port), geo_missing);
+        if proxy_outbound.is_some() {
+            let pinned: Vec<String> = extra_outbounds
+                .iter()
+                .filter_map(|o| o["tag"].as_str().map(str::to_string))
+                .collect();
+            warm_up(app, pinned);
+        }
+        if !geo_files.is_empty() {
+            schedule_geo(app, geo_files, proxy_outbound.is_some().then_some(port), geo_missing);
         }
         Ok(())
     }
@@ -321,17 +378,52 @@ impl CoreState {
     }
 }
 
+/// The first request over some transports (e.g. gRPC + Reality) takes several seconds
+/// while the connection is set up. Open the tunnel right away so the user's first page
+/// doesn't hang, and tell the UI when it's ready (or that it isn't passing traffic).
+fn warm_up(app: &AppHandle, pinned_tags: Vec<String>) {
+    // Servers that services are pinned to pay the same first-connection cost.
+    for tag in pinned_tags {
+        std::thread::spawn(move || {
+            let _ = crate::diag::clash_delay_via(&tag, "http://www.gstatic.com/generate_204", 15000);
+        });
+    }
+    let app = app.clone();
+    std::thread::spawn(move || {
+        let _ = app.emit("vpn://warm", "start".to_string());
+        let started = Instant::now();
+        let deadline = started + Duration::from_secs(30);
+        while Instant::now() < deadline {
+            if !app.state::<CoreState>().status().running {
+                let _ = app.emit("vpn://warm", "done".to_string());
+                return;
+            }
+            if crate::diag::clash_delay("http://www.gstatic.com/generate_204", 8000).is_some() {
+                app_log(&app, format!("Туннель готов (прогрев {:.1} с)", started.elapsed().as_secs_f32()));
+                let _ = app.emit("vpn://warm", "done".to_string());
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(500));
+        }
+        let _ = app.emit("vpn://warm", "fail".to_string());
+        app_error(
+            &app,
+            "Туннель поднят, но трафик через сервер не проходит уже 30 с — проверьте профиль (сервер может не работать) или запустите «Диагностику».".to_string(),
+        );
+    });
+}
+
 /// Download geo lists after connecting: when missing (then restart to apply them) or
 /// when older than a day (applied on the next connect, no interruption).
-fn schedule_geo(app: &AppHandle, region: String, vpn_port: Option<u16>, missing: bool) {
-    let stale = crate::geo::age(app, &region).map(|a| a > crate::geo::MAX_AGE).unwrap_or(true);
+fn schedule_geo(app: &AppHandle, files: Vec<GeoFile>, vpn_port: Option<u16>, missing: bool) {
+    let stale = crate::geo::oldest_age(app, &files).map(|a| a > crate::geo::MAX_AGE).unwrap_or(true);
     if !missing && !stale {
         return;
     }
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
-        app_log(&app, format!("Скачиваю гео-списки «{region}»…"));
-        match crate::geo::download(&app, &region, vpn_port).await {
+        app_log(&app, format!("Скачиваю гео-списки ({} шт.)…", files.len()));
+        match crate::geo::download(&app, &files, vpn_port).await {
             Ok(how) if missing => {
                 app_log(&app, format!("Гео-списки скачаны ({how}) — перезапускаю туннель, чтобы применить их"));
                 let app2 = app.clone();

@@ -12,6 +12,8 @@ import {
   settingsSet,
   isAdmin,
   relaunchAdmin,
+  profilesList,
+  type Profile,
   type RoutingConfig,
   type Service,
   type RuleAction,
@@ -36,6 +38,7 @@ export default function RoutingPage() {
   const [geoState, setGeoState] = useState<"" | "...">("");
   const [geoResult, setGeoResult] = useState<{ ok: boolean; message: string } | null>(null);
   const [settings, setSettings] = useState<Settings | null>(null);
+  const [profiles, setProfiles] = useState<Profile[]>([]);
 
   async function reload() {
     const snap = await routingGet();
@@ -45,6 +48,7 @@ export default function RoutingPage() {
   useEffect(() => {
     reload().catch(console.error);
     settingsGet().then(setSettings).catch(() => setSettings(null));
+    profilesList().then(setProfiles).catch(() => setProfiles([]));
   }, []);
 
   async function setCapture(tun: boolean) {
@@ -102,6 +106,12 @@ export default function RoutingPage() {
     const services = exists
       ? config!.services.filter((s) => s.id !== id)
       : [...config!.services, { id, action: "proxy" as RuleAction }];
+    persist({ ...config!, services });
+  }
+  const serviceProfile = (id: string): string =>
+    config.services.find((s) => s.id === id)?.profile ?? "";
+  function setServiceProfile(id: string, profile: string) {
+    const services = config!.services.map((s) => (s.id === id ? { ...s, profile: profile || null } : s));
     persist({ ...config!, services });
   }
   function setServiceAction(id: string, action: RuleAction) {
@@ -230,6 +240,11 @@ export default function RoutingPage() {
                     </div>
                     <div className="muted" style={{ fontSize: 11, margin: "6px 0" }}>
                       {svc.domains.length} доменов · {svc.ip_cidrs.length} IP
+                      {svc.geosite && (
+                        <span title={`Плюс полный обновляемый список geosite-${svc.geosite} (скачивается автоматически)`}>
+                          {" "}· + полный список
+                        </span>
+                      )}
                     </div>
                     <div style={{ display: "flex", gap: 6 }}>
                       <select
@@ -246,6 +261,19 @@ export default function RoutingPage() {
                         Изм.
                       </button>
                     </div>
+                    {on && serviceAction(svc.id) === "proxy" && profiles.length > 1 && (
+                      <select
+                        value={serviceProfile(svc.id)}
+                        onChange={(e) => setServiceProfile(svc.id, e.target.value)}
+                        style={{ ...selStyle, width: "100%", marginTop: 6, fontSize: 12 }}
+                        title="Через какой сервер пускать этот сервис"
+                      >
+                        <option value="">сервер: активный профиль</option>
+                        {profiles.map((p) => (
+                          <option key={p.id} value={p.id}>сервер: {p.name}</option>
+                        ))}
+                      </select>
+                    )}
                   </div>
                 );
               })}

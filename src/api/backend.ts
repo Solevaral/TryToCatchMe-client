@@ -122,6 +122,8 @@ export interface RoutingRule {
 export interface ServiceSel {
   id: string;
   action: RuleAction;
+  /** Route this service through a specific profile instead of the active one. */
+  profile?: string | null;
 }
 
 export interface Service {
@@ -130,6 +132,8 @@ export interface Service {
   icon: string;
   domains: string[];
   ip_cidrs: string[];
+  /** Community geosite list backing the service (complete, auto-updated). */
+  geosite?: string | null;
 }
 
 export interface RoutingConfig {

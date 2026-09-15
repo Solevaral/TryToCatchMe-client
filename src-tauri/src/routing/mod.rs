@@ -12,7 +12,7 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager};
 
-use ttcm_core::routing::{build_route, RouteSpec, RoutingConfig, Service};
+use ttcm_core::routing::{build_route, geo_files, service_geo_file, GeoFile, GeoInput, RouteSpec, RoutingConfig, Service};
 
 const DEFAULT_PRESETS: &str = include_str!("../../resources/service-presets.json");
 const SERVICE_LIBRARY: &str = include_str!("../../resources/service-library.json");
@@ -31,7 +31,7 @@ pub fn library() -> Vec<Service> {
 }
 
 /// Bump when built-in service domains change, so stored catalogs pick up additions.
-const PRESETS_VERSION: u32 = 2;
+const PRESETS_VERSION: u32 = 5;
 
 #[derive(Serialize, Deserialize, Clone)]
 struct Persisted {
@@ -43,6 +43,55 @@ struct Persisted {
     presets_version: u32,
 }
 
+/// v5: Gemini is no longer a separate service. Google decides the country for Gemini
+/// from ALL its domains (accounts, www.google.com, googleapis), so Gemini on one server
+/// and Google on another shows "not available in your country". Keeps the user's
+/// custom Gemini domains and the server Gemini was pinned to.
+fn merge_gemini_into_google(p: &mut Persisted) {
+    let Some(gi) = p.catalog.iter().position(|s| s.id == "gemini") else {
+        return;
+    };
+    let gemini = p.catalog.remove(gi);
+    if !p.catalog.iter().any(|s| s.id == "google") {
+        if let Some(b) = library().into_iter().find(|s| s.id == "google") {
+            p.catalog.push(b);
+        }
+    }
+    if let Some(google) = p.catalog.iter_mut().find(|s| s.id == "google") {
+        if google.name == "Google" {
+            google.name = "Google + Gemini".to_string();
+        }
+        for d in gemini.domains {
+            let dn = d.trim().trim_start_matches('.').to_ascii_lowercase();
+            let covered = google.domains.iter().any(|g| {
+                let g = g.trim().trim_start_matches('.').to_ascii_lowercase();
+                dn == g || dn.ends_with(&format!(".{g}"))
+            });
+            if !covered {
+                google.domains.push(d);
+            }
+        }
+    }
+    let Some(si) = p.config.services.iter().position(|s| s.id == "gemini") else {
+        return;
+    };
+    let mut gem = p.config.services.remove(si);
+    match p.config.services.iter_mut().find(|s| s.id == "google") {
+        Some(google) => {
+            if gem.action == "proxy" {
+                google.action = "proxy".to_string();
+                if gem.profile.as_deref().is_some_and(|x| !x.is_empty()) {
+                    google.profile = gem.profile;
+                }
+            }
+        }
+        None => {
+            gem.id = "google".to_string();
+            p.config.services.insert(si.min(p.config.services.len()), gem);
+        }
+    }
+}
+
 /// Bring a stored catalog up to date without discarding user edits: built-in services
 /// gain any newly added domains/IPs, and enabled selections that point at services no
 /// longer in the catalog are dropped. Returns true if anything changed.
@@ -50,9 +99,15 @@ fn migrate(p: &mut Persisted) -> bool {
     if p.presets_version >= PRESETS_VERSION {
         return false;
     }
+    if p.presets_version < 5 {
+        merge_gemini_into_google(p);
+    }
     let builtin = library();
     for svc in p.catalog.iter_mut() {
         if let Some(b) = builtin.iter().find(|b| b.id == svc.id) {
+            if svc.geosite.is_none() {
+                svc.geosite = b.geosite.clone();
+            }
             for d in &b.domains {
                 if !svc.domains.contains(d) {
                     svc.domains.push(d.clone());
@@ -69,6 +124,29 @@ fn migrate(p: &mut Persisted) -> bool {
     p.config.services.retain(|s| ids.contains(&s.id));
     p.presets_version = PRESETS_VERSION;
     true
+}
+
+/// Extra resources the routing needs (see `RoutingStore::plan`).
+#[derive(Default, Clone)]
+pub struct RoutePlan {
+    pub region: Option<String>,
+    /// Geosite lists backing enabled (non-direct) services, e.g. "google".
+    pub service_geosites: Vec<String>,
+    /// Profile ids that services are pinned to.
+    pub pinned_profiles: Vec<String>,
+}
+
+impl RoutePlan {
+    pub fn region_files(&self) -> Vec<GeoFile> {
+        self.region.as_deref().map(|r| geo_files(r).to_vec()).unwrap_or_default()
+    }
+
+    /// Every geo file the routing needs.
+    pub fn files(&self) -> Vec<GeoFile> {
+        let mut files = self.region_files();
+        files.extend(self.service_geosites.iter().map(|n| service_geo_file(n)));
+        files
+    }
 }
 
 #[derive(Default)]
@@ -178,20 +256,38 @@ impl RoutingStore {
         let _ = self.save(app);
     }
 
-    /// Materialize route rules. `geo_dir` = folder with downloaded geo lists, or `None`
-    /// when they aren't available (the geo rule is then left out).
-    pub fn route_spec(&self, geo_dir: Option<&str>) -> RouteSpec {
-        self.with(|p| build_route(&p.config, &p.catalog, geo_dir))
+    /// Materialize route rules. `geo` = which downloaded lists exist (missing ones are
+    /// left out).
+    pub fn route_spec(&self, geo: Option<&GeoInput>) -> RouteSpec {
+        self.with(|p| build_route(&p.config, &p.catalog, geo))
     }
 
-    /// Selected geo region in rule mode (e.g. "ru"), if any.
-    pub fn geo_region(&self) -> Option<String> {
+    /// What the current routing needs beyond the active profile: geo lists to download
+    /// and profiles that some services are pinned to (rule mode only).
+    pub fn plan(&self) -> RoutePlan {
         self.with(|p| {
-            if p.config.mode == "rule" {
-                p.config.region.clone().filter(|r| !r.is_empty())
-            } else {
-                None
+            if p.config.mode != "rule" {
+                return RoutePlan::default();
             }
+            let mut plan = RoutePlan {
+                region: p.config.region.clone().filter(|r| !r.is_empty()),
+                ..Default::default()
+            };
+            for sel in &p.config.services {
+                let Some(svc) = p.catalog.iter().find(|s| s.id == sel.id) else { continue };
+                if let Some(g) = &svc.geosite {
+                    if sel.action != "direct" && !plan.service_geosites.contains(g) {
+                        plan.service_geosites.push(g.clone());
+                    }
+                }
+                if let Some(pid) = sel.profile.as_ref().filter(|pid| !pid.is_empty()) {
+                    if sel.action == "proxy" && !plan.pinned_profiles.contains(pid) {
+                        plan.pinned_profiles.push(pid.clone());
+                    }
+                }
+            }
+            plan
         })
     }
+
 }

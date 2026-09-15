@@ -32,11 +32,32 @@ export default function SettingsPage() {
     }
   }
 
+  const [portDraft, setPortDraft] = useState<string>("");
+  const [portMsg, setPortMsg] = useState<{ ok: boolean; text: string } | null>(null);
+
+  useEffect(() => {
+    if (settings) setPortDraft(String(settings.proxy_port));
+  }, [settings?.proxy_port]); // eslint-disable-line react-hooks/exhaustive-deps
+
   async function patch(p: Partial<Settings>) {
     if (!settings) return;
     const next = { ...settings, ...p };
-    setSettings(next);
     await settingsSet(next);
+    setSettings(next);
+  }
+
+  async function savePort() {
+    const port = Number(portDraft);
+    if (!Number.isInteger(port) || port < 1024 || port > 65534) {
+      setPortMsg({ ok: false, text: "Порт должен быть целым числом от 1024 до 65534" });
+      return;
+    }
+    try {
+      await patch({ proxy_port: port });
+      setPortMsg({ ok: true, text: "Сохранено — применится при следующем подключении (или «Перезапустить»)" });
+    } catch (e) {
+      setPortMsg({ ok: false, text: String(e) });
+    }
   }
 
   return (
@@ -52,8 +73,47 @@ export default function SettingsPage() {
             disabled={autostart === null}
             onChange={toggleAutostart}
           />
-          Запускать при входе в Windows (свёрнуто в трей)
+          Запускать при входе в систему (свёрнуто в трей)
         </label>
+      </div>
+
+      <div className="card" style={{ marginBottom: 18 }}>
+        <div style={{ fontWeight: 600, marginBottom: 10 }}>Системный прокси</div>
+        {settings ? (
+          <>
+            <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+              <span>Порт: 127.0.0.1:</span>
+              <input
+                value={portDraft}
+                onChange={(e) => setPortDraft(e.target.value.replace(/\D/g, ""))}
+                onKeyDown={(e) => e.key === "Enter" && savePort()}
+                style={{
+                  width: 90,
+                  background: "var(--bg-2)",
+                  border: "1px solid var(--border)",
+                  borderRadius: 8,
+                  color: "var(--text-0)",
+                  padding: "6px 8px",
+                }}
+              />
+              <button className="btn" onClick={savePort} disabled={portDraft === String(settings.proxy_port)}>
+                Сохранить
+              </button>
+            </div>
+            {portMsg && (
+              <div style={{ fontSize: 12, marginTop: 6, color: portMsg.ok ? "var(--ok)" : "var(--err)" }}>
+                {portMsg.text}
+              </div>
+            )}
+            <div className="muted" style={{ fontSize: 12, marginTop: 8 }}>
+              При подключении приложение запоминает твои настройки прокси и направляет системный
+              прокси на этот порт; при отключении (и после аварийного завершения) возвращает их
+              обратно. Порт + 1 занят служебной загрузкой гео-списков.
+            </div>
+          </>
+        ) : (
+          <div className="muted">Загрузка…</div>
+        )}
       </div>
 
       <div className="card" style={{ marginBottom: 18 }}>

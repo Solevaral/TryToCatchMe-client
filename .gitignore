@@ -19,3 +19,6 @@ src-tauri/binaries/wintun.dll
 .idea
 .DS_Store
 Thumbs.db
+
+# Local update notes
+upd-*.txt

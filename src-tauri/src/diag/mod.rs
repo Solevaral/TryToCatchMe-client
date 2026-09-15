@@ -14,6 +14,11 @@ use std::time::{Duration, Instant};
 use serde::Serialize;
 
 use crate::config::CLASH_CONTROLLER;
+use ttcm_core::gateway::{pick_gateway, RouteCandidate};
+#[cfg(not(windows))]
+use ttcm_core::gateway::parse_linux_routes;
+#[cfg(windows)]
+use ttcm_core::gateway::{parse_route_print, parse_windows_routes};
 
 #[derive(Serialize, Clone)]
 pub struct DiagStep {
@@ -56,10 +61,10 @@ pub fn run(input: DiagInput) -> DiagReport {
     // 1. Local network / default gateway.
     let gw = default_gateway();
     match &gw {
-        Some(ip) => match icmp_ping(ip) {
-            true => steps.push(step("local", "ПК → роутер / шлюз", "ok", format!("шлюз {ip} отвечает"), None)),
+        Some((ip, adapter)) => match icmp_ping(ip) {
+            true => steps.push(step("local", "ПК → роутер / шлюз", "ok", format!("шлюз {ip}{adapter} отвечает"), None)),
             false => {
-                steps.push(step("local", "ПК → роутер / шлюз", "fail", format!("шлюз {ip} не отвечает"), None));
+                steps.push(step("local", "ПК → роутер / шлюз", "fail", format!("шлюз {ip}{adapter} не отвечает"), None));
                 verdict = "Обрыв на звене: локальная сеть / роутер".into();
                 decided = true;
             }
@@ -241,37 +246,45 @@ fn http_get_localhost(authority: &str, path: &str, timeout_ms: u64) -> Option<St
     buf.split_once("\r\n\r\n").map(|(_, body)| body.to_string())
 }
 
-/// Windows: parse the default gateway from `route print 0.0.0.0` (locale-independent).
-#[cfg(windows)]
-fn default_gateway() -> Option<String> {
-    let mut cmd = Command::new("route");
-    cmd.args(["print", "0.0.0.0"]);
-    use std::os::windows::process::CommandExt;
-    cmd.creation_flags(0x0800_0000);
-    let out = cmd.output().ok()?;
-    let text = String::from_utf8_lossy(&out.stdout);
-    for line in text.lines() {
-        let cols: Vec<&str> = line.split_whitespace().collect();
-        // "0.0.0.0  0.0.0.0  <gateway>  <iface>  <metric>"
-        if cols.len() >= 3 && cols[0] == "0.0.0.0" && cols[1] == "0.0.0.0" {
-            let gw = cols[2];
-            if gw != "0.0.0.0" && gw.parse::<std::net::Ipv4Addr>().is_ok() {
-                return Some(gw.to_string());
-            }
-        }
+/// Format the adapter for messages: " (Ethernet)" or "".
+fn adapter_suffix(r: &RouteCandidate) -> String {
+    if r.adapter.is_empty() {
+        String::new()
+    } else {
+        format!(" ({})", r.adapter)
     }
-    None
 }
 
-#[cfg(not(windows))]
-fn default_gateway() -> Option<String> {
-    // Linux: `ip route` -> "default via <gw> ..."
-    let out = Command::new("ip").args(["route"]).output().ok()?;
-    let text = String::from_utf8_lossy(&out.stdout);
-    for line in text.lines() {
-        if line.starts_with("default via ") {
-            return line.split_whitespace().nth(2).map(|s| s.to_string());
-        }
+/// Windows: the real router among default routes — physical adapter, lowest metric —
+/// so VPN/virtual adapters (Radmin VPN, Hamachi, Wintun, …) aren't mistaken for it.
+#[cfg(windows)]
+fn default_gateway() -> Option<(String, String)> {
+    use std::os::windows::process::CommandExt;
+    const QUERY: &str = "Get-NetRoute -DestinationPrefix 0.0.0.0/0 -AddressFamily IPv4 -ErrorAction SilentlyContinue | ForEach-Object { $a = Get-NetAdapter -InterfaceIndex $_.ifIndex -ErrorAction SilentlyContinue; '{0}|{1}|{2}|{3}' -f $_.NextHop, ($_.RouteMetric + $_.InterfaceMetric), $a.Name, $a.InterfaceDescription }";
+    let mut ps = Command::new("powershell");
+    ps.args(["-NoProfile", "-NonInteractive", "-Command", QUERY]);
+    ps.creation_flags(0x0800_0000);
+    let mut routes = ps
+        .output()
+        .map(|o| parse_windows_routes(&String::from_utf8_lossy(&o.stdout)))
+        .unwrap_or_default();
+    if routes.is_empty() {
+        // Fallback without adapter names: `route print` (locale-independent rows).
+        let mut rp = Command::new("route");
+        rp.args(["print", "0.0.0.0"]);
+        rp.creation_flags(0x0800_0000);
+        routes = rp
+            .output()
+            .map(|o| parse_route_print(&String::from_utf8_lossy(&o.stdout)))
+            .unwrap_or_default();
     }
-    None
+    pick_gateway(&routes).map(|r| (r.gateway.clone(), adapter_suffix(r)))
+}
+
+/// Linux: `ip route show default`, skipping tun/wg/docker/… interfaces.
+#[cfg(not(windows))]
+fn default_gateway() -> Option<(String, String)> {
+    let out = Command::new("ip").args(["route", "show", "default"]).output().ok()?;
+    let routes = parse_linux_routes(&String::from_utf8_lossy(&out.stdout));
+    pick_gateway(&routes).map(|r| (r.gateway.clone(), adapter_suffix(r)))
 }

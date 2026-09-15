@@ -11,6 +11,10 @@ fn default_true() -> bool {
     true
 }
 
+fn default_proxy_port() -> u16 {
+    ttcm_core::config::MIXED_PORT
+}
+
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Settings {
     /// DNS-over-HTTPS through the tunnel (anti-leak).
@@ -25,6 +29,9 @@ pub struct Settings {
     /// TUN capture mode (all system traffic via a virtual adapter; needs admin).
     #[serde(default)]
     pub capture_tun: bool,
+    /// Local proxy port the system proxy points at (geo downloads use port + 1).
+    #[serde(default = "default_proxy_port")]
+    pub proxy_port: u16,
 }
 
 impl Default for Settings {
@@ -34,6 +41,7 @@ impl Default for Settings {
             block_quic: false,
             auto_switch: false,
             capture_tun: false,
+            proxy_port: default_proxy_port(),
         }
     }
 }

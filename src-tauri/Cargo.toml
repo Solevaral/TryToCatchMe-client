@@ -1,6 +1,6 @@
 [package]
 name = "trytocatchme"
-version = "0.1.1"
+version = "0.1.2"
 description = "Cross-platform VPN/proxy client (Tauri + sing-box)"
 authors = ["TryToCatchMe"]
 edition = "2021"
@@ -29,9 +29,13 @@ ttcm-core = { path = "ttcm-core" }
 tokio = { version = "1", features = ["time", "rt", "net"] }
 tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect"] }
 futures-util = "0.3"
+# Geo-list downloads. System TLS: SChannel on Windows (nothing to compile), OpenSSL on Linux.
+reqwest = { version = "0.13", default-features = false, features = ["native-tls"] }
 
 [target.'cfg(windows)'.dependencies]
 is_elevated = "0.1"
+# WinINet per-connection options for the system proxy.
+windows-sys = { version = "0.60", features = ["Win32_Foundation", "Win32_Networking_WinInet"] }
 
 [workspace]
 members = ["ttcm-core"]

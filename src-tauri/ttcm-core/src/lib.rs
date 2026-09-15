@@ -4,5 +4,7 @@
 //! platforms (e.g. a future Android target).
 
 pub mod config;
+pub mod gateway;
 pub mod links;
 pub mod routing;
+pub mod sysproxy;

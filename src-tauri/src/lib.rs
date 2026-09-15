@@ -14,11 +14,13 @@ pub mod clash;
 pub mod commands;
 pub mod core;
 pub mod diag;
+pub mod geo;
 pub mod platform;
 pub mod monitor;
 pub mod profiles;
 pub mod routing;
 pub mod settings;
+pub mod sysproxy;
 pub mod tray;
 
 // Pure, platform-independent logic lives in the ttcm-core crate; re-export it under
@@ -46,6 +48,7 @@ pub fn run() {
         .manage(RoutingStore::default())
         .manage(settings::SettingsStore::default())
         .manage(monitor::Monitor::default())
+        .manage(sysproxy::SysProxyState::default())
         .manage(tray::TrayMenu::default())
         .setup(|app| {
             // Load saved profiles + routing + settings from disk at startup.
@@ -53,6 +56,16 @@ pub fn run() {
             store.load(app.handle());
             app.state::<RoutingStore>().load(app.handle());
             app.state::<settings::SettingsStore>().load(app.handle());
+            // Clean up a system proxy left pointing at us by a crash/kill (or by an
+            // older version that let sing-box own it). Report once the UI is listening.
+            let port = app.state::<settings::SettingsStore>().get().proxy_port;
+            if let Some(msg) = app.state::<sysproxy::SysProxyState>().recover(app.handle(), port) {
+                let handle = app.handle().clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_secs(3));
+                    let _ = tauri::Emitter::emit(&handle, "app://log", msg);
+                });
+            }
             // System tray (starts in the idle/blue state).
             tray::build(app.handle())?;
             Ok(())
@@ -83,6 +96,8 @@ pub fn run() {
             commands::services_reset,
             commands::services_library,
             commands::geo_refresh,
+            commands::sysproxy_status,
+            commands::sysproxy_reapply,
             commands::settings_get,
             commands::settings_set,
             commands::is_admin,
@@ -98,7 +113,7 @@ pub fn run() {
             if let tauri::RunEvent::Exit = event {
                 app.state::<monitor::Monitor>().stop();
                 app.state::<ClashStreams>().stop();
-                let _ = app.state::<CoreState>().stop();
+                let _ = app.state::<CoreState>().stop(app);
             }
         });
 }

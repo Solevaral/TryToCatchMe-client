@@ -82,8 +82,9 @@ fn toggle_vpn(app: &AppHandle) {
     let core = app.state::<CoreState>();
     let clash = app.state::<ClashStreams>();
     if core.status().running {
+        app.state::<crate::monitor::Monitor>().stop();
         clash.stop();
-        let _ = core.stop();
+        let _ = core.stop(app);
         set_state(app, "idle");
         let _ = app.emit("vpn://state", "idle");
     } else {
@@ -111,8 +112,9 @@ fn toggle_vpn(app: &AppHandle) {
 fn quit_app(app: &AppHandle) {
     let clash = app.state::<ClashStreams>();
     clash.stop();
+    app.state::<crate::monitor::Monitor>().stop();
     let core = app.state::<CoreState>();
-    let _ = core.stop();
+    let _ = core.stop(app);
     app.exit(0);
 }
 

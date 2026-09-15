@@ -178,8 +178,20 @@ impl RoutingStore {
         let _ = self.save(app);
     }
 
-    /// Materialize the sing-box route pieces for the current config + catalog.
-    pub fn route_spec(&self) -> RouteSpec {
-        self.with(|p| build_route(&p.config, &p.catalog))
+    /// Materialize route rules. `geo_dir` = folder with downloaded geo lists, or `None`
+    /// when they aren't available (the geo rule is then left out).
+    pub fn route_spec(&self, geo_dir: Option<&str>) -> RouteSpec {
+        self.with(|p| build_route(&p.config, &p.catalog, geo_dir))
+    }
+
+    /// Selected geo region in rule mode (e.g. "ru"), if any.
+    pub fn geo_region(&self) -> Option<String> {
+        self.with(|p| {
+            if p.config.mode == "rule" {
+                p.config.region.clone().filter(|r| !r.is_empty())
+            } else {
+                None
+            }
+        })
     }
 }

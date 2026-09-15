@@ -37,6 +37,8 @@ export interface Settings {
   block_quic: boolean;
   auto_switch: boolean;
   capture_tun: boolean;
+  /** Local proxy port (the system proxy points here; port + 1 is reserved). */
+  proxy_port: number;
 }
 
 export async function isAdmin(): Promise<boolean> {
@@ -168,8 +170,33 @@ export async function servicesLibrary(): Promise<Service[]> {
   return await invoke<Service[]>("services_library");
 }
 
-export async function geoRefresh(): Promise<void> {
-  await invoke("geo_refresh");
+export interface GeoRefreshResult {
+  ok: boolean;
+  message: string;
+}
+
+/** Re-download geo lists; the result says what really happened. */
+export async function geoRefresh(): Promise<GeoRefreshResult> {
+  return await invoke<GeoRefreshResult>("geo_refresh");
+}
+
+// ---- system proxy ----
+
+export interface SysProxyStatus {
+  /** Our port while the app manages the system proxy (connected, not TUN). */
+  applied_port: number | null;
+  /** The OS system proxy currently points at our port. */
+  ours: boolean;
+  /** Human-readable current OS setting. */
+  current: string;
+}
+
+export async function sysproxyStatus(): Promise<SysProxyStatus> {
+  return await invoke<SysProxyStatus>("sysproxy_status");
+}
+
+export async function sysproxyReapply(): Promise<void> {
+  await invoke("sysproxy_reapply");
 }
 
 // ---- diagnostics ----

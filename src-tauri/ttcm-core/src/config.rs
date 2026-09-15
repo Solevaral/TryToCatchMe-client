@@ -144,7 +144,7 @@ pub fn generate(opts: &GenOptions) -> Value {
 
     // Inbounds. In TUN mode a virtual adapter captures ALL system traffic (so even
     // apps that ignore the OS proxy go through the VPN). The local mixed proxy is always
-    // exposed; the app points the OS system proxy at it when not in TUN mode.
+    // exposed; the app points the OS system proxy at it (in TUN mode too).
     let mut inbounds = vec![json!({
         "type": "mixed",
         "tag": "mixed-in",

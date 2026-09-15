@@ -237,16 +237,20 @@ impl CoreState {
         self.expected.store(true, Ordering::SeqCst);
 
         // The app — not sing-box — owns the OS system proxy (see crate::sysproxy).
-        if tun {
-            app_log(app, "Режим TUN: системный прокси не используется".to_string());
-        } else {
-            match app.state::<SysProxyState>().apply(app, port) {
-                Ok(()) => app_log(app, format!("Системный прокси включён: {MIXED_LISTEN}:{port}")),
-                Err(e) => app_error(
-                    app,
-                    format!("Ядро работает, но включить системный прокси не удалось: {e}. Укажите вручную {MIXED_LISTEN}:{port}."),
-                ),
-            }
+        // In TUN mode too: apps that read the system proxy (Electron apps like Claude
+        // Desktop, browsers) connect to whatever it points at, and a proxy left by
+        // another client (e.g. Hiddify) would send them past the tunnel entirely.
+        match app.state::<SysProxyState>().apply(app, port) {
+            Ok(()) if tun => app_log(app, format!("Системный прокси тоже направлен в VPN: {MIXED_LISTEN}:{port} (программы, читающие прокси, не уйдут мимо TUN)")),
+            Ok(()) => app_log(app, format!("Системный прокси включён: {MIXED_LISTEN}:{port}")),
+            Err(e) if tun => app_error(
+                app,
+                format!("TUN работает, но системный прокси перенаправить не удалось: {e}. Программы, использующие системный прокси, могут идти мимо VPN."),
+            ),
+            Err(e) => app_error(
+                app,
+                format!("Ядро работает, но включить системный прокси не удалось: {e}. Укажите вручную {MIXED_LISTEN}:{port}."),
+            ),
         }
 
         if proxy_outbound.is_some() {

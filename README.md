@@ -45,7 +45,9 @@ installer and a Linux AppImage.
   crash. Windows (WinINet) and Linux (GNOME / KDE). If another app takes the proxy
   over, you are told and can re-apply it in one click.
 - **TUN** — captures all traffic, including apps that ignore the proxy (needs admin
-  rights; the app offers to relaunch elevated).
+  rights; the app offers to relaunch elevated). The system proxy is pointed at the app
+  in TUN mode too, so apps that read it (Electron apps, browsers) can't be sent past
+  the tunnel by a proxy another client left behind.
 - Copy-ready `HTTP_PROXY` / `HTTPS_PROXY` commands for PowerShell, cmd and bash/zsh,
   for CLI tools that ignore the system proxy.
 - Configurable local proxy port.

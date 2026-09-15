@@ -8,7 +8,7 @@ use crate::links::Profile;
 use crate::profiles::{ImportResult, ProfileStore};
 use crate::routing::{RoutingSnapshot, RoutingStore};
 use crate::settings::{Settings, SettingsStore};
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 use ttcm_core::routing::{RoutingConfig, Service};
 
 #[tauri::command]
@@ -18,13 +18,26 @@ pub fn app_version() -> String {
 
 // ---- core ----
 
+/// Run a blocking core operation off the UI thread; any failure is also written to
+/// the log console so the user always sees WHY, not just "Ошибка".
+async fn run_core<F>(app: &AppHandle, op: F) -> Result<(), String>
+where
+    F: FnOnce(&AppHandle) -> Result<(), String> + Send + 'static,
+{
+    let app2 = app.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || op(&app2))
+        .await
+        .map_err(|e| format!("внутренняя ошибка: {e}"))
+        .and_then(|r| r);
+    if let Err(e) = &result {
+        let _ = app.emit("app://error", format!("Не удалось подключиться: {e}"));
+    }
+    result
+}
+
 #[tauri::command]
 pub async fn core_start(app: AppHandle) -> Result<(), String> {
-    // Run the blocking spawn/wait off the UI thread so the window never freezes.
-    let app2 = app.clone();
-    tauri::async_runtime::spawn_blocking(move || app2.state::<CoreState>().start(&app2))
-        .await
-        .map_err(|e| e.to_string())??;
+    run_core(&app, |a| a.state::<CoreState>().start(a)).await?;
     // Core is up (Clash API ready) — start live traffic/log streams + failover monitor.
     app.state::<ClashStreams>().start(app.clone());
     app.state::<crate::monitor::Monitor>().start(app.clone());
@@ -45,10 +58,7 @@ pub fn core_stop(
 #[tauri::command]
 pub async fn core_restart(app: AppHandle) -> Result<(), String> {
     app.state::<ClashStreams>().stop();
-    let app2 = app.clone();
-    tauri::async_runtime::spawn_blocking(move || app2.state::<CoreState>().restart(&app2))
-        .await
-        .map_err(|e| e.to_string())??;
+    run_core(&app, |a| a.state::<CoreState>().restart(a)).await?;
     app.state::<ClashStreams>().start(app.clone());
     Ok(())
 }
@@ -155,10 +165,7 @@ pub async fn geo_refresh(app: AppHandle) -> Result<(), String> {
     }
     if app.state::<CoreState>().status().running {
         app.state::<ClashStreams>().stop();
-        let app2 = app.clone();
-        tauri::async_runtime::spawn_blocking(move || app2.state::<CoreState>().restart(&app2))
-            .await
-            .map_err(|e| e.to_string())??;
+        run_core(&app, |a| a.state::<CoreState>().restart(a)).await?;
         app.state::<ClashStreams>().start(app.clone());
     }
     Ok(())

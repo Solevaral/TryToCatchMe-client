@@ -17,10 +17,21 @@ use ttcm_core::routing::{build_route, RouteSpec, RoutingConfig, Service};
 const DEFAULT_PRESETS: &str = include_str!("../../resources/service-presets.json");
 const SERVICE_LIBRARY: &str = include_str!("../../resources/service-library.json");
 
-/// The large read-only catalog users can pick services from.
+/// The large read-only catalog users can pick services from — the built-in defaults
+/// (so removed defaults like YouTube can be re-added) plus the extended library.
 pub fn library() -> Vec<Service> {
-    serde_json::from_str(SERVICE_LIBRARY).unwrap_or_default()
+    let mut out = default_catalog();
+    let extra: Vec<Service> = serde_json::from_str(SERVICE_LIBRARY).unwrap_or_default();
+    for s in extra {
+        if !out.iter().any(|x| x.id == s.id) {
+            out.push(s);
+        }
+    }
+    out
 }
+
+/// Bump when built-in service domains change, so stored catalogs pick up additions.
+const PRESETS_VERSION: u32 = 2;
 
 #[derive(Serialize, Deserialize, Clone)]
 struct Persisted {
@@ -28,6 +39,36 @@ struct Persisted {
     config: RoutingConfig,
     #[serde(default)]
     catalog: Vec<Service>,
+    #[serde(default)]
+    presets_version: u32,
+}
+
+/// Bring a stored catalog up to date without discarding user edits: built-in services
+/// gain any newly added domains/IPs, and enabled selections that point at services no
+/// longer in the catalog are dropped. Returns true if anything changed.
+fn migrate(p: &mut Persisted) -> bool {
+    if p.presets_version >= PRESETS_VERSION {
+        return false;
+    }
+    let builtin = library();
+    for svc in p.catalog.iter_mut() {
+        if let Some(b) = builtin.iter().find(|b| b.id == svc.id) {
+            for d in &b.domains {
+                if !svc.domains.contains(d) {
+                    svc.domains.push(d.clone());
+                }
+            }
+            for ip in &b.ip_cidrs {
+                if !svc.ip_cidrs.contains(ip) {
+                    svc.ip_cidrs.push(ip.clone());
+                }
+            }
+        }
+    }
+    let ids: Vec<String> = p.catalog.iter().map(|s| s.id.clone()).collect();
+    p.config.services.retain(|s| ids.contains(&s.id));
+    p.presets_version = PRESETS_VERSION;
+    true
 }
 
 #[derive(Default)]
@@ -67,11 +108,16 @@ impl RoutingStore {
         let mut p = data.unwrap_or_else(|| Persisted {
             config: RoutingConfig::default(),
             catalog: Vec::new(),
+            presets_version: PRESETS_VERSION,
         });
         if p.catalog.is_empty() {
             p.catalog = default_catalog();
         }
+        let changed = migrate(&mut p);
         *self.inner.lock() = Some(p);
+        if changed {
+            let _ = self.save(app);
+        }
     }
 
     fn with<R>(&self, f: impl FnOnce(&mut Persisted) -> R) -> R {
@@ -79,6 +125,7 @@ impl RoutingStore {
         let p = g.get_or_insert_with(|| Persisted {
             config: RoutingConfig::default(),
             catalog: default_catalog(),
+            presets_version: PRESETS_VERSION,
         });
         f(p)
     }

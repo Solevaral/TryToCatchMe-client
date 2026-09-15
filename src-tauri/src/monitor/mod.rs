@@ -87,9 +87,18 @@ fn run_loop(app: AppHandle, stop: Arc<AtomicBool>) {
             );
             profiles.set_active(&app, Some(next));
             app.state::<ClashStreams>().stop();
-            let _ = app.state::<CoreState>().restart(&app);
-            app.state::<ClashStreams>().start(app.clone());
-            let _ = app.emit("vpn://state", "connected".to_string());
+            match app.state::<CoreState>().restart(&app) {
+                Ok(()) => {
+                    app.state::<ClashStreams>().start(app.clone());
+                    crate::tray::set_state(&app, "connected");
+                    let _ = app.emit("vpn://state", "connected".to_string());
+                }
+                Err(e) => {
+                    crate::tray::set_state(&app, "error");
+                    let _ = app.emit("vpn://state", "error".to_string());
+                    let _ = app.emit("app://error", format!("Не удалось переключиться на «{name}»: {e}"));
+                }
+            }
         }
     }
 }

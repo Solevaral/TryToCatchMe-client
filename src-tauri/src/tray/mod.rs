@@ -87,18 +87,23 @@ fn toggle_vpn(app: &AppHandle) {
         set_state(app, "idle");
         let _ = app.emit("vpn://state", "idle");
     } else {
-        match core.start(app) {
+        // Starting blocks until the core is up — do it off the event-loop thread so
+        // the window and tray stay responsive.
+        let app = app.clone();
+        let _ = app.emit("vpn://state", "connecting");
+        std::thread::spawn(move || match app.state::<CoreState>().start(&app) {
             Ok(()) => {
-                clash.start(app.clone());
-                set_state(app, "connected");
+                app.state::<ClashStreams>().start(app.clone());
+                app.state::<crate::monitor::Monitor>().start(app.clone());
+                set_state(&app, "connected");
                 let _ = app.emit("vpn://state", "connected");
             }
             Err(e) => {
-                set_state(app, "error");
+                set_state(&app, "error");
                 let _ = app.emit("vpn://state", "error");
-                let _ = app.emit("app://error", e);
+                let _ = app.emit("app://error", format!("Не удалось подключиться: {e}"));
             }
-        }
+        });
     }
 }
 

@@ -46,13 +46,14 @@ pub async fn core_start(app: AppHandle) -> Result<(), String> {
 
 #[tauri::command]
 pub fn core_stop(
+    app: AppHandle,
     state: State<'_, CoreState>,
     clash: State<'_, ClashStreams>,
     monitor: State<'_, crate::monitor::Monitor>,
 ) -> Result<(), String> {
     monitor.stop();
     clash.stop();
-    state.stop()
+    state.stop(&app)
 }
 
 #[tauri::command]
@@ -157,17 +158,65 @@ pub fn services_library() -> Vec<Service> {
     crate::routing::library()
 }
 
-/// Clear the cached geo rule-sets and (if connected) reconnect so they re-download.
+#[derive(serde::Serialize)]
+pub struct GeoRefreshResult {
+    pub ok: bool,
+    pub message: String,
+}
+
+/// Re-download geo lists and report what really happened. Downloads go through the VPN
+/// when connected, falling back to direct; the old lists stay if the download fails.
 #[tauri::command]
-pub async fn geo_refresh(app: AppHandle) -> Result<(), String> {
-    if let Ok(dir) = app.path().app_config_dir() {
-        let _ = std::fs::remove_file(dir.join("cache.db"));
+pub async fn geo_refresh(app: AppHandle) -> GeoRefreshResult {
+    let result = |ok: bool, message: String| {
+        let _ = app.emit(if ok { "app://log" } else { "app://error" }, message.clone());
+        GeoRefreshResult { ok, message }
+    };
+    let Some(region) = app.state::<RoutingStore>().geo_region() else {
+        return result(false, "Регион не выбран (нужен режим «Rule» и отмеченный регион)".into());
+    };
+    let running = app.state::<CoreState>().status().running;
+    let has_proxy = app.state::<ProfileStore>().active_outbound().is_some();
+    let vpn_port = (running && has_proxy).then(|| app.state::<SettingsStore>().get().proxy_port);
+    let had_old = crate::geo::ready_dir(&app, &region).is_some();
+
+    match crate::geo::download(&app, &region, vpn_port).await {
+        Ok(how) if running => {
+            app.state::<ClashStreams>().stop();
+            match run_core(&app, |a| a.state::<CoreState>().restart(a)).await {
+                Ok(()) => {
+                    app.state::<ClashStreams>().start(app.clone());
+                    result(true, format!("Списки скачаны ({how}) и применены"))
+                }
+                Err(e) => result(false, format!("Списки скачаны ({how}), но перезапустить туннель не удалось: {e}")),
+            }
+        }
+        Ok(how) => result(true, format!("Списки скачаны ({how}) — применятся при подключении")),
+        Err(e) => {
+            let mut msg = format!("Не удалось скачать списки: {e}.");
+            if had_old {
+                msg.push_str(" Сохранённые списки оставлены.");
+            }
+            if vpn_port.is_none() {
+                msg.push_str(" Подключите VPN и повторите — GitHub может быть недоступен напрямую.");
+            }
+            result(false, msg)
+        }
     }
-    if app.state::<CoreState>().status().running {
-        app.state::<ClashStreams>().stop();
-        run_core(&app, |a| a.state::<CoreState>().restart(a)).await?;
-        app.state::<ClashStreams>().start(app.clone());
-    }
+}
+
+// ---- system proxy ----
+
+#[tauri::command]
+pub fn sysproxy_status(state: State<'_, crate::sysproxy::SysProxyState>) -> crate::sysproxy::SysProxyStatus {
+    state.status()
+}
+
+/// Point the system proxy back at us after another program overwrote it.
+#[tauri::command]
+pub fn sysproxy_reapply(app: AppHandle, state: State<'_, crate::sysproxy::SysProxyState>) -> Result<(), String> {
+    state.reapply()?;
+    let _ = app.emit("app://log", "Системный прокси снова указывает на TryToCatchMe".to_string());
     Ok(())
 }
 
@@ -179,8 +228,13 @@ pub fn settings_get(store: State<'_, SettingsStore>) -> Settings {
 }
 
 #[tauri::command]
-pub fn settings_set(app: AppHandle, store: State<'_, SettingsStore>, settings: Settings) {
+pub fn settings_set(app: AppHandle, store: State<'_, SettingsStore>, settings: Settings) -> Result<(), String> {
+    // The geo-download inbound uses port + 1, so the top port is reserved.
+    if !(1024..=65534).contains(&settings.proxy_port) {
+        return Err("Порт прокси должен быть от 1024 до 65534".into());
+    }
     store.set(&app, settings);
+    Ok(())
 }
 
 /// Whether the app currently runs with administrator rights (needed for TUN).

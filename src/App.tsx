@@ -4,6 +4,7 @@ import { useAppStore, type Page } from "./store/appStore";
 import { useLogStore } from "./store/logStore";
 import { coreStatus, traySetState, relaunchAdmin, settingsGet, settingsSet } from "./api/backend";
 import { useConnection } from "./hooks/useConnection";
+import SysProxyLine from "./components/SysProxyLine";
 import ProfilesPage from "./pages/ProfilesPage";
 import RoutingPage from "./pages/RoutingPage";
 import DiagnosticsPage from "./pages/DiagnosticsPage";
@@ -176,6 +177,7 @@ export default function App() {
               {lastError}
             </div>
           )}
+          <SysProxyLine connected={status === "connected"} />
           {status === "connected" && (
             <div
               className="muted"

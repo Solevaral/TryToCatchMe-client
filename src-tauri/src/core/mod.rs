@@ -1,13 +1,15 @@
 //! sing-box sidecar lifecycle management.
 //!
 //! Generates a config.json, spawns the sing-box process (`run -c config.json`),
-//! waits for the Clash API controller to come up, and stops it gracefully.
+//! waits for the Clash API controller to come up, applies/releases the OS system proxy
+//! and keeps geo lists downloaded.
 
 use std::fs;
 use std::io::{BufRead, BufReader, Read};
 use std::net::TcpStream;
 use std::path::PathBuf;
 use std::process::{Child, Command};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -15,13 +17,17 @@ use parking_lot::Mutex;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager};
 
-use crate::config::{self, GenOptions, CLASH_CONTROLLER};
+use crate::clash::ClashStreams;
+use crate::config::{self, geo_port, GenOptions, CLASH_CONTROLLER, MIXED_LISTEN};
+use crate::sysproxy::SysProxyState;
 use crate::profiles::ProfileStore;
 use crate::routing::RoutingStore;
 
 #[derive(Default)]
 pub struct CoreState {
     inner: Mutex<Inner>,
+    /// The core is supposed to be running (set on successful start, cleared on stop).
+    expected: AtomicBool,
 }
 
 #[derive(Default)]
@@ -74,7 +80,6 @@ impl CoreState {
             .map_err(|e| format!("не найдена папка настроек: {e}"))?;
         fs::create_dir_all(&cfg_dir).map_err(|e| format!("не удалось создать папку настроек: {e}"))?;
         let cfg_path = cfg_dir.join("config.json");
-        let cache_path = cfg_dir.join("cache.db").to_string_lossy().to_string();
 
         // Inject the active profile's outbound (if any) so traffic actually goes
         // through the selected server; otherwise fall back to direct-only.
@@ -84,14 +89,30 @@ impl CoreState {
             Some(s) => app_log(app, format!("Профиль: {s}")),
             None => app_log(app, "Профиль не выбран — весь трафик пойдёт напрямую".to_string()),
         }
-        let spec = app.state::<RoutingStore>().route_spec();
         let settings = app.state::<crate::settings::SettingsStore>().get();
         let tun = settings.capture_tun;
+        let port = settings.proxy_port;
+
+        // Geo lists are local files the app downloads itself; without them the geo
+        // rule is simply left out (and they get downloaded after connecting).
+        let routing = app.state::<RoutingStore>();
+        let region = routing.geo_region();
+        let geo_dir = region.as_deref().and_then(|r| crate::geo::ready_dir(app, r));
+        if let Some(r) = &region {
+            match &geo_dir {
+                Some(_) => app_log(app, format!("Гео-списки «{r}»: загружены")),
+                None => app_log(
+                    app,
+                    format!("Гео-списки «{r}» ещё не скачаны — подключаюсь без них и скачаю после подключения"),
+                ),
+            }
+        }
+        let spec = routing.route_spec(geo_dir.as_deref());
         app_log(
             app,
             format!(
                 "Перехват: {} · правил маршрутизации: {} · остальной трафик: {}",
-                if tun { "TUN (весь трафик)" } else { "системный прокси" },
+                if tun { "TUN (весь трафик)".to_string() } else { format!("системный прокси {MIXED_LISTEN}:{port}") },
                 spec.rules.len(),
                 if proxy_outbound.is_some() { spec.final_action.as_str() } else { "direct" }
             ),
@@ -109,79 +130,79 @@ impl CoreState {
             );
         }
 
-        let mixed_addr = format!("{}:{}", config::MIXED_LISTEN, config::MIXED_PORT);
         ensure_port_free(CLASH_CONTROLLER, "Clash API")?;
-        ensure_port_free(&mixed_addr, "локальный прокси")?;
+        ensure_port_free(&format!("{MIXED_LISTEN}:{port}"), "локальный прокси")?;
+        if proxy_outbound.is_some() {
+            ensure_port_free(
+                &format!("{MIXED_LISTEN}:{}", geo_port(port)),
+                "служебный порт загрузки гео-списков (порт прокси + 1)",
+            )?;
+        }
 
-        let had_rule_sets = !spec.rule_sets.is_empty();
-        let opts = GenOptions {
+        let options = |route_rules: Vec<serde_json::Value>, rule_sets: Vec<serde_json::Value>| GenOptions {
+            mixed_port: port,
             proxy_outbound: proxy_outbound.clone(),
-            route_rules: spec.rules.clone(),
-            rule_sets: spec.rule_sets.clone(),
+            route_rules,
+            rule_sets,
             final_action: spec.final_action.clone(),
             dns_doh: settings.dns_doh,
             block_quic: settings.block_quic,
-            cache_path: Some(cache_path.clone()),
             tun,
             ..GenOptions::default()
         };
-        let cfg = config::generate(&opts);
-        fs::write(&cfg_path, config::to_string(&cfg))
-            .map_err(|e| format!("не удалось записать config.json: {e}"))?;
+        let write_cfg = |opts: &GenOptions| -> Result<(), String> {
+            fs::write(&cfg_path, config::to_string(&config::generate(opts)))
+                .map_err(|e| format!("не удалось записать config.json: {e}"))
+        };
+        write_cfg(&options(spec.rules.clone(), spec.rule_sets.clone()))?;
         app_log(app, format!("Конфиг: {}", cfg_path.display()));
 
-        // Pre-flight: validate the config so a bad profile/rule surfaces the REAL
-        // reason in the log instead of a generic "did not come up" after a hang.
-        if let Err(err) = preflight_check(&bin, &work_dir, &cfg_path) {
-            return Err(format!("sing-box отклонил конфигурацию: {err}"));
-        }
-        app_log(app, "Конфиг прошёл проверку, запускаю ядро…".to_string());
-
-        // First attempt.
-        let first_err = match self.spawn_and_wait(app, &bin, &work_dir, &cfg_path) {
-            Ok(()) => {
-                app_log(app, "Ядро запущено".to_string());
-                return Ok(());
-            }
-            Err(e) => e,
+        // Pre-flight (`sing-box check`) surfaces the REAL reason for a bad profile/rule
+        // instead of a generic "did not come up"; then spawn and wait for the core.
+        let check_and_spawn = || -> Result<(), String> {
+            preflight_check(&bin, &work_dir, &cfg_path)
+                .map_err(|err| format!("sing-box отклонил конфигурацию: {err}"))?;
+            app_log(app, "Конфиг прошёл проверку, запускаю ядро…".to_string());
+            self.spawn_and_wait(app, &bin, &work_dir, &cfg_path)
         };
 
-        // Fallback: a remote rule-set may be unavailable (e.g. a 404 or blocked
-        // download), which makes sing-box abort at startup. Retry once WITHOUT geo
-        // rule-sets — but only when that is actually what failed.
-        let rule_set_failure = first_err.to_lowercase().contains("rule-set")
-            || first_err.to_lowercase().contains("rule_set");
-        if had_rule_sets && rule_set_failure {
-            let _ = app.emit(
-                "app://error",
-                "Не удалось загрузить geosite/geoip списки — запускаю без них. Проверьте регион в «Маршрутизации».".to_string(),
-            );
-            // Drop the geo rule-sets and any rule that references one.
-            let filtered_rules: Vec<_> = spec
-                .rules
-                .into_iter()
-                .filter(|r| r.get("rule_set").is_none())
-                .collect();
-            let opts2 = GenOptions {
-                proxy_outbound,
-                route_rules: filtered_rules,
-                rule_sets: Vec::new(),
-                final_action: spec.final_action,
-                dns_doh: settings.dns_doh,
-                block_quic: settings.block_quic,
-                cache_path: Some(cache_path.clone()),
-                tun,
-                ..GenOptions::default()
-            };
-            let cfg2 = config::generate(&opts2);
-            fs::write(&cfg_path, config::to_string(&cfg2))
-                .map_err(|e| format!("не удалось записать config.json: {e}"))?;
-            self.spawn_and_wait(app, &bin, &work_dir, &cfg_path)?;
-            app_log(app, "Ядро запущено (без geo-списков)".to_string());
-            return Ok(());
+        let mut geo_missing = geo_dir.is_none();
+        match check_and_spawn() {
+            Ok(()) => {}
+            Err(e) if geo_dir.is_some() && e.to_lowercase().contains("rule-set") => {
+                // A downloaded list is unreadable (check or run rejected it): drop it,
+                // run without geo, and re-download after connecting.
+                app_error(app, format!("Сохранённые гео-списки повреждены — удаляю и запускаюсь без них ({e})"));
+                if let Some(r) = &region {
+                    crate::geo::remove(app, r);
+                }
+                let rules = spec.rules.iter().filter(|r| r.get("rule_set").is_none()).cloned().collect();
+                write_cfg(&options(rules, Vec::new()))?;
+                check_and_spawn()?;
+                geo_missing = true;
+            }
+            Err(e) => return Err(e),
+        }
+        app_log(app, "Ядро запущено".to_string());
+        self.expected.store(true, Ordering::SeqCst);
+
+        // The app — not sing-box — owns the OS system proxy (see crate::sysproxy).
+        if tun {
+            app_log(app, "Режим TUN: системный прокси не используется".to_string());
+        } else {
+            match app.state::<SysProxyState>().apply(app, port) {
+                Ok(()) => app_log(app, format!("Системный прокси включён: {MIXED_LISTEN}:{port}")),
+                Err(e) => app_error(
+                    app,
+                    format!("Ядро работает, но включить системный прокси не удалось: {e}. Укажите вручную {MIXED_LISTEN}:{port}."),
+                ),
+            }
         }
 
-        Err(first_err)
+        if let Some(r) = region {
+            schedule_geo(app, r, proxy_outbound.is_some().then_some(port), geo_missing);
+        }
+        Ok(())
     }
 
     /// Spawn sing-box, stream its stdout/stderr into the log console, and wait for
@@ -268,18 +289,79 @@ impl CoreState {
 
     /// Stop then start with a freshly generated config (apply routing changes).
     pub fn restart(&self, app: &AppHandle) -> Result<(), String> {
-        self.stop()?;
+        self.stop(app)?;
         self.start(app)
     }
 
-    pub fn stop(&self) -> Result<(), String> {
-        let mut g = self.inner.lock();
-        if let Some(mut child) = g.child.take() {
-            child.kill().map_err(|e| format!("kill sing-box: {e}"))?;
-            let _ = child.wait();
+    /// Stop the core and give the system proxy back. sing-box is hard-killed (there is
+    /// no graceful stop signal on Windows), which is exactly why the app — not sing-box —
+    /// owns the system proxy: the kill can no longer leave it pointing at a dead port.
+    pub fn stop(&self, app: &AppHandle) -> Result<(), String> {
+        self.expected.store(false, Ordering::SeqCst);
+        let killed = {
+            let mut g = self.inner.lock();
+            match g.child.take() {
+                Some(mut child) => {
+                    let r = child.kill().map_err(|e| format!("не удалось остановить sing-box: {e}"));
+                    let _ = child.wait();
+                    r
+                }
+                None => Ok(()),
+            }
+        };
+        if let Some(msg) = app.state::<SysProxyState>().release(app) {
+            app_log(app, msg);
         }
-        Ok(())
+        killed
     }
+
+    /// True when the core should be running but its process is gone (crashed).
+    pub fn died_unexpectedly(&self) -> bool {
+        self.expected.load(Ordering::SeqCst) && !self.status().running
+    }
+}
+
+/// Download geo lists after connecting: when missing (then restart to apply them) or
+/// when older than a day (applied on the next connect, no interruption).
+fn schedule_geo(app: &AppHandle, region: String, vpn_port: Option<u16>, missing: bool) {
+    let stale = crate::geo::age(app, &region).map(|a| a > crate::geo::MAX_AGE).unwrap_or(true);
+    if !missing && !stale {
+        return;
+    }
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        app_log(&app, format!("Скачиваю гео-списки «{region}»…"));
+        match crate::geo::download(&app, &region, vpn_port).await {
+            Ok(how) if missing => {
+                app_log(&app, format!("Гео-списки скачаны ({how}) — перезапускаю туннель, чтобы применить их"));
+                let app2 = app.clone();
+                let _ = tauri::async_runtime::spawn_blocking(move || {
+                    let core = app2.state::<CoreState>();
+                    if !core.status().running {
+                        return;
+                    }
+                    app2.state::<ClashStreams>().stop();
+                    match core.restart(&app2) {
+                        Ok(()) => app2.state::<ClashStreams>().start(app2.clone()),
+                        Err(e) => {
+                            crate::tray::set_state(&app2, "error");
+                            let _ = app2.emit("vpn://state", "error".to_string());
+                            app_error(&app2, format!("Не удалось перезапустить туннель после загрузки списков: {e}"));
+                        }
+                    }
+                })
+                .await;
+            }
+            Ok(how) => app_log(&app, format!("Гео-списки обновлены ({how}) — применятся при следующем подключении")),
+            Err(e) => app_error(
+                &app,
+                format!(
+                    "Не удалось скачать гео-списки: {e}. {}",
+                    if missing { "Работаю без них." } else { "Использую сохранённые." }
+                ),
+            ),
+        }
+    });
 }
 
 /// Validate the config with `sing-box check`. Returns the combined output on error.
@@ -303,6 +385,11 @@ type LogTail = Arc<Mutex<Vec<String>>>;
 /// Informational step in the log console (so it's never empty on failure).
 fn app_log(app: &AppHandle, msg: String) {
     let _ = app.emit("app://log", msg);
+}
+
+/// Error line in the log console (also shown under the connection status).
+fn app_error(app: &AppHandle, msg: String) {
+    let _ = app.emit("app://error", msg);
 }
 
 /// Fail early with a clear message if a port we need is taken by another program.

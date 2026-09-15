@@ -95,8 +95,37 @@ const GEOSITE_BASE: &str =
     "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set";
 const GEOIP_BASE: &str = "https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set";
 
+/// A geo rule-set file the app downloads for a region.
+#[derive(Clone, Debug)]
+pub struct GeoFile {
+    pub tag: String,
+    pub file_name: String,
+    pub url: String,
+}
+
+/// The files needed for a region. NOTE: SagerNet names the per-country domain list
+/// "geosite-category-<code>.srs" (plain "geosite-<code>.srs" is a 404).
+pub fn geo_files(region: &str) -> [GeoFile; 2] {
+    let site = format!("geosite-category-{region}.srs");
+    let ip = format!("geoip-{region}.srs");
+    [
+        GeoFile {
+            tag: format!("geosite-{region}"),
+            url: format!("{GEOSITE_BASE}/{site}"),
+            file_name: site,
+        },
+        GeoFile {
+            tag: format!("geoip-{region}"),
+            url: format!("{GEOIP_BASE}/{ip}"),
+            file_name: ip,
+        },
+    ]
+}
+
 /// Build the sing-box route rules for a routing config + the service catalog.
-pub fn build_route(cfg: &RoutingConfig, catalog: &[Service]) -> RouteSpec {
+/// `geo_dir` is the folder holding downloaded geo files; `None` (e.g. not downloaded
+/// yet) leaves the geo rule out.
+pub fn build_route(cfg: &RoutingConfig, catalog: &[Service], geo_dir: Option<&str>) -> RouteSpec {
     match cfg.mode.as_str() {
         "global" => RouteSpec {
             rules: vec![],
@@ -108,11 +137,11 @@ pub fn build_route(cfg: &RoutingConfig, catalog: &[Service]) -> RouteSpec {
             rule_sets: vec![],
             final_action: "direct".to_string(),
         },
-        _ => build_rule_mode(cfg, catalog),
+        _ => build_rule_mode(cfg, catalog, geo_dir),
     }
 }
 
-fn build_rule_mode(cfg: &RoutingConfig, catalog: &[Service]) -> RouteSpec {
+fn build_rule_mode(cfg: &RoutingConfig, catalog: &[Service], geo_dir: Option<&str>) -> RouteSpec {
     let mut rules: Vec<Value> = Vec::new();
     let mut rule_sets: Vec<Value> = Vec::new();
 
@@ -142,35 +171,23 @@ fn build_rule_mode(cfg: &RoutingConfig, catalog: &[Service]) -> RouteSpec {
         rules.push(json!({ &kind: values, "outbound": action }));
     }
 
-    // Geo rule-sets by region.
-    if let Some(region) = cfg.region.as_ref().filter(|r| !r.is_empty()) {
-        let site_tag = format!("geosite-{region}");
-        let ip_tag = format!("geoip-{region}");
-        // NOTE: SagerNet publishes the per-country domain list as
-        // "geosite-category-<code>.srs" (plain "geosite-ru.srs" returns 404 and
-        // makes sing-box abort at startup).
-        // Download the lists THROUGH the proxy: raw.githubusercontent.com is often
-        // blocked/throttled by the local ISP (e.g. in Russia), so a direct download
-        // silently fails. Going through the tunnel reaches GitHub reliably. The lists
-        // are cached to disk (experimental.cache_file) and refreshed daily.
-        rule_sets.push(json!({
-            "type": "remote", "tag": site_tag,
-            "format": "binary",
-            "url": format!("{GEOSITE_BASE}/geosite-category-{region}.srs"),
-            // sing-box 1.14 form (legacy `download_detour` is removed in 1.16).
-            "http_client": { "detour": "proxy" },
-            "update_interval": "24h"
-        }));
-        rule_sets.push(json!({
-            "type": "remote", "tag": ip_tag,
-            "format": "binary",
-            "url": format!("{GEOIP_BASE}/geoip-{region}.srs"),
-            // sing-box 1.14 form (legacy `download_detour` is removed in 1.16).
-            "http_client": { "detour": "proxy" },
-            "update_interval": "24h"
-        }));
+    // Geo rule-sets by region, as LOCAL files the app downloads itself (see
+    // `geo_files`). The core never fetches them, so a blocked/failed download can't
+    // abort startup; without the files the geo rule is simply omitted.
+    if let (Some(region), Some(dir)) = (cfg.region.as_ref().filter(|r| !r.is_empty()), geo_dir) {
+        let files = geo_files(region);
+        let mut tags = Vec::new();
+        for f in &files {
+            rule_sets.push(json!({
+                "type": "local",
+                "tag": f.tag,
+                "format": "binary",
+                "path": format!("{}/{}", dir.trim_end_matches(['/', '\\']), f.file_name)
+            }));
+            tags.push(f.tag.clone());
+        }
         rules.push(json!({
-            "rule_set": [site_tag, ip_tag],
+            "rule_set": tags,
             "outbound": sanitize_action(&cfg.geo_action)
         }));
     }
@@ -239,6 +256,7 @@ mod tests {
                 ..Default::default()
             },
             &[],
+            None,
         );
         assert_eq!(spec.final_action, "proxy");
         assert!(spec.rules.is_empty());
@@ -256,10 +274,16 @@ mod tests {
             region: Some("ru".into()),
             ..Default::default()
         };
-        let spec = build_route(&cfg, &catalog());
+        let spec = build_route(&cfg, &catalog(), Some("C:/data/rules"));
         // private-ip + service + grouped user rule + geo = 4 rules
         assert_eq!(spec.rules.len(), 4);
         assert_eq!(spec.rule_sets.len(), 2);
+        assert_eq!(spec.rule_sets[0]["type"], "local");
+        assert_eq!(spec.rule_sets[0]["path"], "C:/data/rules/geosite-category-ru.srs");
+        // Without downloaded files the geo rule is left out instead of failing.
+        let no_geo = build_route(&cfg, &catalog(), None);
+        assert_eq!(no_geo.rules.len(), 3);
+        assert!(no_geo.rule_sets.is_empty());
         assert_eq!(spec.final_action, "proxy");
         // grouped user rule has both domains
         let user = &spec.rules[2];

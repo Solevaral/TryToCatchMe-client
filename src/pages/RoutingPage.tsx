@@ -33,7 +33,8 @@ export default function RoutingPage() {
   const [editing, setEditing] = useState<Service | null>(null);
   const [showLibrary, setShowLibrary] = useState(false);
   const [reloadState, setReloadState] = useState<"" | "..." | "ok" | "off">("");
-  const [geoState, setGeoState] = useState<"" | "..." | "ok">("");
+  const [geoState, setGeoState] = useState<"" | "...">("");
+  const [geoResult, setGeoResult] = useState<{ ok: boolean; message: string } | null>(null);
   const [settings, setSettings] = useState<Settings | null>(null);
 
   async function reload() {
@@ -261,14 +262,32 @@ export default function RoutingPage() {
                 disabled={!config.region || geoState === "..."}
                 onClick={async () => {
                   setGeoState("...");
-                  try { await geoRefresh(); setGeoState("ok"); } catch { setGeoState(""); }
-                  setTimeout(() => setGeoState(""), 1800);
+                  setGeoResult(null);
+                  try {
+                    setGeoResult(await geoRefresh());
+                  } catch (e) {
+                    setGeoResult({ ok: false, message: String(e) });
+                  }
+                  setGeoState("");
                 }}
-                title="Сбросить кэш и перекачать списки geosite/geoip"
+                title="Скачать свежие списки geosite/geoip (через VPN, при неудаче — напрямую). Старые списки остаются, если скачать не удалось."
               >
-                {geoState === "..." ? "Обновляю…" : geoState === "ok" ? "Обновлено ✓" : "↻ Обновить списки"}
+                {geoState === "..." ? "Скачиваю…" : "↻ Обновить списки"}
               </button>
             </div>
+            {geoResult && (
+              <div
+                style={{
+                  fontSize: 12,
+                  marginBottom: 10,
+                  color: geoResult.ok ? "var(--ok)" : "var(--err)",
+                  wordBreak: "break-word",
+                }}
+              >
+                {geoResult.ok ? "✓ " : "✕ "}
+                {geoResult.message}
+              </div>
+            )}
             <label style={{ display: "flex", gap: 10, alignItems: "flex-start" }}>
               <input
                 type="checkbox"

@@ -1,4 +1,5 @@
-//! Auto-failover monitor.
+//! Connection monitor: detects a crashed core and an overwritten system proxy (every
+//! few seconds) and does auto-failover between profiles.
 //!
 //! While the tunnel is up and "auto-switch" is enabled, periodically time a request
 //! through the active proxy. After several consecutive failures, switch to the next
@@ -19,6 +20,8 @@ use crate::profiles::ProfileStore;
 use crate::settings::SettingsStore;
 
 const CHECK_INTERVAL_SECS: u64 = 15;
+/// How often to check that the core is alive and the system proxy is still ours.
+const WATCH_INTERVAL_SECS: u64 = 3;
 const FAIL_THRESHOLD: u32 = 3;
 
 #[derive(Default)]
@@ -46,15 +49,44 @@ impl Monitor {
     }
 }
 
+/// Core crashed → give the system proxy back and report; proxy overwritten → warn once.
+fn watch(app: &AppHandle) {
+    let core = app.state::<CoreState>();
+    if core.died_unexpectedly() {
+        app.state::<ClashStreams>().stop();
+        let _ = core.stop(app); // releases the system proxy
+        crate::tray::set_state(app, "error");
+        let _ = app.emit("vpn://state", "error".to_string());
+        let _ = app.emit(
+            "app://error",
+            "Ядро sing-box неожиданно завершилось — системный прокси возвращён. Причина — в строках лога выше.".to_string(),
+        );
+        return;
+    }
+    if let Some(current) = app.state::<crate::sysproxy::SysProxyState>().check_overwritten() {
+        let _ = app.emit("sysproxy://overwritten", current.clone());
+        let _ = app.emit(
+            "app://error",
+            format!("Системный прокси перезаписан другой программой (сейчас: {current}) — браузеры идут мимо VPN. Нажмите «Применить снова»."),
+        );
+    }
+}
+
 fn run_loop(app: AppHandle, stop: Arc<AtomicBool>) {
     let mut fails: u32 = 0;
+    let mut tick: u64 = 0;
     loop {
-        // Interruptible sleep.
-        for _ in 0..CHECK_INTERVAL_SECS {
-            if stop.load(Ordering::SeqCst) {
-                return;
-            }
-            std::thread::sleep(Duration::from_secs(1));
+        // Interruptible one-second ticks.
+        if stop.load(Ordering::SeqCst) {
+            return;
+        }
+        std::thread::sleep(Duration::from_secs(1));
+        tick += 1;
+        if tick % WATCH_INTERVAL_SECS == 0 {
+            watch(&app);
+        }
+        if tick % CHECK_INTERVAL_SECS != 0 {
+            continue;
         }
 
         if !app.state::<CoreState>().status().running {

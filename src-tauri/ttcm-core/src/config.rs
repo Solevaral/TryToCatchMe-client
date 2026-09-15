@@ -1,18 +1,27 @@
 //! sing-box config.json generation.
 //!
-//! A local `mixed` (SOCKS+HTTP) inbound that can set the OS system proxy, the active
-//! outbound (direct-only when no profile), routing rules/rule-sets from the routing
-//! layer, and the Clash API controller for the UI (traffic/logs).
+//! A local `mixed` (SOCKS+HTTP) inbound (the app points the OS system proxy at it),
+//! the active outbound (direct-only when no profile), routing rules/rule-sets from the
+//! routing layer, and the Clash API controller for the UI (traffic/logs).
 
 use serde_json::{json, Value};
 
 pub const CLASH_CONTROLLER: &str = "127.0.0.1:9090";
 pub const MIXED_LISTEN: &str = "127.0.0.1";
+/// Default local proxy port (user-configurable in Settings).
 pub const MIXED_PORT: u16 = 2080;
 
+/// Port of the internal inbound the app uses to download geo lists THROUGH the
+/// proxy: always the proxy port + 1.
+pub fn geo_port(mixed_port: u16) -> u16 {
+    mixed_port.saturating_add(1)
+}
+
 pub struct GenOptions {
-    /// When true, the mixed inbound configures the OS system proxy (no admin).
-    pub set_system_proxy: bool,
+    /// Port of the local mixed (HTTP+SOCKS) proxy. The OS system proxy itself is
+    /// managed by the app, never by sing-box: the core is stopped with a hard kill, and
+    /// sing-box would leave the system proxy pointing at a dead port.
+    pub mixed_port: u16,
     /// The active proxy outbound (tag=proxy). `None` => direct-only.
     pub proxy_outbound: Option<Value>,
     pub log_level: String,
@@ -26,8 +35,6 @@ pub struct GenOptions {
     pub dns_doh: bool,
     /// Block QUIC / UDP:443 so traffic falls back to TLS (helps SNI/Reality rules).
     pub block_quic: bool,
-    /// Absolute path for sing-box's rule-set cache (persists downloaded geo lists).
-    pub cache_path: Option<String>,
     /// TUN mode: capture ALL system traffic via a virtual adapter (needs admin).
     /// When false, only the local mixed proxy + OS system-proxy setting are used.
     pub tun: bool,
@@ -36,7 +43,7 @@ pub struct GenOptions {
 impl Default for GenOptions {
     fn default() -> Self {
         Self {
-            set_system_proxy: true,
+            mixed_port: MIXED_PORT,
             proxy_outbound: None,
             log_level: "info".to_string(),
             route_rules: Vec::new(),
@@ -44,7 +51,6 @@ impl Default for GenOptions {
             final_action: "proxy".to_string(),
             dns_doh: true,
             block_quic: false,
-            cache_path: None,
             tun: false,
         }
     }
@@ -89,6 +95,11 @@ pub fn generate(opts: &GenOptions) -> Value {
     if opts.tun {
         rules.push(json!({ "protocol": "dns", "action": "hijack-dns" }));
     }
+    // The app's own geo-list downloads always go through the VPN (the ISP often
+    // blocks raw.githubusercontent.com), regardless of the routing mode.
+    if has_proxy {
+        rules.push(json!({ "inbound": ["geo-in"], "outbound": "proxy" }));
+    }
     if has_proxy && opts.block_quic {
         rules.push(json!({ "network": "udp", "port": 443, "action": "reject" }));
     }
@@ -108,15 +119,22 @@ pub fn generate(opts: &GenOptions) -> Value {
     );
 
     // Inbounds. In TUN mode a virtual adapter captures ALL system traffic (so even
-    // apps that ignore the OS proxy go through the VPN); the system proxy is left off.
-    // Otherwise a local mixed proxy is exposed and set as the OS system proxy.
+    // apps that ignore the OS proxy go through the VPN). The local mixed proxy is always
+    // exposed; the app points the OS system proxy at it when not in TUN mode.
     let mut inbounds = vec![json!({
         "type": "mixed",
         "tag": "mixed-in",
         "listen": MIXED_LISTEN,
-        "listen_port": MIXED_PORT,
-        "set_system_proxy": !opts.tun && opts.set_system_proxy
+        "listen_port": opts.mixed_port
     })];
+    if has_proxy {
+        inbounds.push(json!({
+            "type": "http",
+            "tag": "geo-in",
+            "listen": MIXED_LISTEN,
+            "listen_port": geo_port(opts.mixed_port)
+        }));
+    }
     if opts.tun {
         inbounds.insert(
             0,
@@ -134,7 +152,7 @@ pub fn generate(opts: &GenOptions) -> Value {
         );
     }
 
-    let mut cfg = json!({
+    let cfg_base = json!({
         "log": { "level": opts.log_level, "timestamp": true },
         "inbounds": inbounds,
         "outbounds": outbounds,
@@ -143,11 +161,7 @@ pub fn generate(opts: &GenOptions) -> Value {
             "clash_api": { "external_controller": CLASH_CONTROLLER }
         }
     });
-
-    // Persist downloaded rule-sets so they aren't re-fetched on every connect.
-    if let Some(path) = &opts.cache_path {
-        cfg["experimental"]["cache_file"] = json!({ "enabled": true, "path": path });
-    }
+    let mut cfg = cfg_base;
 
     // DNS follows routing. `dns-direct` is the system resolver (works exactly like
     // without a VPN, never depends on the proxy). With DoH enabled, domains that are
@@ -244,7 +258,18 @@ mod tests {
         let cfg = generate(&GenOptions { tun: true, ..only_youtube() });
         assert_eq!(cfg["route"]["rules"][1]["action"], "hijack-dns");
         assert_eq!(cfg["inbounds"][0]["type"], "tun");
-        assert_eq!(cfg["inbounds"][1]["set_system_proxy"], false);
+        // sing-box must never own the system proxy (a hard kill would leave it behind).
+        assert!(cfg["inbounds"].as_array().unwrap().iter().all(|i| i.get("set_system_proxy").is_none()));
+    }
+
+    #[test]
+    fn geo_downloads_are_forced_through_proxy_on_port_plus_one() {
+        let cfg = generate(&GenOptions { mixed_port: 3000, ..only_youtube() });
+        let inbounds = cfg["inbounds"].as_array().unwrap();
+        assert!(inbounds.iter().any(|i| i["tag"] == "mixed-in" && i["listen_port"] == 3000));
+        assert!(inbounds.iter().any(|i| i["tag"] == "geo-in" && i["listen_port"] == 3001));
+        let rules = cfg["route"]["rules"].as_array().unwrap();
+        assert!(rules.iter().any(|r| r["inbound"][0] == "geo-in" && r["outbound"] == "proxy"));
     }
 
     #[test]

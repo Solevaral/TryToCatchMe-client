@@ -132,6 +132,25 @@ impl ProfileStore {
         Some((p.server.clone(), p.port))
     }
 
+    /// Human-readable one-liner for the active profile (no secrets), for the log.
+    pub fn active_summary(&self) -> Option<String> {
+        let g = self.inner.lock();
+        let active = g.active.as_ref()?;
+        let p = g.profiles.iter().find(|p| &p.id == active)?;
+        let transport = p.outbound["transport"]["type"].as_str().unwrap_or("tcp");
+        let security = if p.outbound["tls"]["reality"]["enabled"] == true {
+            "reality"
+        } else if p.outbound["tls"]["enabled"] == true {
+            "tls"
+        } else {
+            "без TLS"
+        };
+        Some(format!(
+            "«{}» — {} {}:{} ({}, {})",
+            p.name, p.protocol, p.server, p.port, transport, security
+        ))
+    }
+
     /// The active profile's server host + port (for diagnostics).
     pub fn active_endpoint(&self) -> Option<(String, u16)> {
         let g = self.inner.lock();

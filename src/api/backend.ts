@@ -69,6 +69,13 @@ export interface Profile {
   protocol: string;
   server: string;
   port: number;
+  /** sing-box outbound (only the fields the UI reads are typed). */
+  outbound?: {
+    transport?: { type?: string };
+    tls?: { enabled?: boolean; reality?: { enabled?: boolean } };
+    flow?: string;
+  };
+  link?: string | null;
 }
 
 export interface ImportResult {

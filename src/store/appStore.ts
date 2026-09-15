@@ -23,6 +23,10 @@ interface AppState {
   up: number;
   down: number;
   setTraffic: (up: number, down: number) => void;
+
+  // human-readable reason of the last connection failure (shown under the status)
+  lastError: string | null;
+  setLastError: (e: string | null) => void;
 }
 
 export const useAppStore = create<AppState>((set) => ({
@@ -38,4 +42,7 @@ export const useAppStore = create<AppState>((set) => ({
   up: 0,
   down: 0,
   setTraffic: (up, down) => set({ up, down }),
+
+  lastError: null,
+  setLastError: (lastError) => set({ lastError }),
 }));

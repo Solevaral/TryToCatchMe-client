@@ -157,14 +157,16 @@ fn build_rule_mode(cfg: &RoutingConfig, catalog: &[Service]) -> RouteSpec {
             "type": "remote", "tag": site_tag,
             "format": "binary",
             "url": format!("{GEOSITE_BASE}/geosite-category-{region}.srs"),
-            "download_detour": "proxy",
+            // sing-box 1.14 form (legacy `download_detour` is removed in 1.16).
+            "http_client": { "detour": "proxy" },
             "update_interval": "24h"
         }));
         rule_sets.push(json!({
             "type": "remote", "tag": ip_tag,
             "format": "binary",
             "url": format!("{GEOIP_BASE}/geoip-{region}.srs"),
-            "download_detour": "proxy",
+            // sing-box 1.14 form (legacy `download_detour` is removed in 1.16).
+            "http_client": { "detour": "proxy" },
             "update_interval": "24h"
         }));
         rules.push(json!({

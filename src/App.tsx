@@ -2,7 +2,7 @@ import { useEffect } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { useAppStore, type Page } from "./store/appStore";
 import { useLogStore } from "./store/logStore";
-import { coreStatus, traySetState } from "./api/backend";
+import { coreStatus, traySetState, relaunchAdmin, settingsGet, settingsSet } from "./api/backend";
 import { useConnection } from "./hooks/useConnection";
 import ProfilesPage from "./pages/ProfilesPage";
 import RoutingPage from "./pages/RoutingPage";
@@ -33,7 +33,7 @@ function fmtSpeed(bytesPerSec: number): string {
 }
 
 export default function App() {
-  const { page, setPage, status, setStatus, up, down, setTraffic } = useAppStore();
+  const { page, setPage, status, setStatus, up, down, setTraffic, lastError, setLastError } = useAppStore();
 
   // Sync status from the core at startup (window may have been reopened from tray).
   useEffect(() => {
@@ -54,7 +54,40 @@ export default function App() {
     unlisteners.push(
       listen<string>("vpn://state", (e) => {
         const s = e.payload;
-        setStatus(s === "connected" ? "connected" : s === "error" ? "error" : "disconnected");
+        setStatus(
+          s === "connected" ? "connected" : s === "error" ? "error" : s === "connecting" ? "connecting" : "disconnected"
+        );
+        if (s === "connected" || s === "idle") setLastError(null);
+      })
+    );
+    // Step-by-step progress of connecting (profile, capture mode, config, core start).
+    unlisteners.push(
+      listen<string>("app://log", (e) => {
+        useLogStore.getState().add("app", e.payload);
+      })
+    );
+    // TUN is on but the app isn't elevated: offer the two ways out instead of a bare error.
+    unlisteners.push(
+      listen<string>("app://needs-admin", async () => {
+        const relaunch = window.confirm(
+          [
+            "Включён режим перехвата TUN, а приложение запущено без прав администратора.",
+            "",
+            "OK — перезапустить от имени администратора.",
+            "Отмена — выключить TUN (перехват через системный прокси) и подключиться так.",
+          ].join("\n")
+        );
+        if (relaunch) {
+          await relaunchAdmin();
+          return;
+        }
+        try {
+          const st = await settingsGet();
+          await settingsSet({ ...st, capture_tun: false });
+          useLogStore.getState().add("app", "TUN выключен — используется системный прокси. Нажмите «Подключить» ещё раз.");
+        } catch {
+          /* ignore */
+        }
       })
     );
     unlisteners.push(
@@ -76,6 +109,7 @@ export default function App() {
     unlisteners.push(
       listen<string>("app://error", (e) => {
         useLogStore.getState().add("error", e.payload);
+        setLastError(e.payload);
       })
     );
     unlisteners.push(
@@ -92,7 +126,7 @@ export default function App() {
     return () => {
       unlisteners.forEach((p) => p.then((un) => un()).catch(() => {}));
     };
-  }, [setStatus, setPage, setTraffic]);
+  }, [setStatus, setPage, setTraffic, setLastError]);
 
   const dotClass =
     status === "connected"
@@ -125,6 +159,23 @@ export default function App() {
             <span className={dotClass} />
             <span>{STATUS_LABEL[status]}</span>
           </div>
+          {status === "error" && lastError && (
+            <div
+              onClick={() => setPage("logs")}
+              title="Открыть логи"
+              style={{
+                fontSize: 11,
+                marginTop: 8,
+                color: "var(--err)",
+                cursor: "pointer",
+                maxHeight: 120,
+                overflow: "auto",
+                wordBreak: "break-word",
+              }}
+            >
+              {lastError}
+            </div>
+          )}
           {status === "connected" && (
             <div
               className="muted"

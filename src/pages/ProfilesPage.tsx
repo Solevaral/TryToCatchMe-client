@@ -1,16 +1,14 @@
 import { useEffect, useState, useCallback } from "react";
 import { readText } from "@tauri-apps/plugin-clipboard-manager";
-import { useAppStore } from "../store/appStore";
+import { useLogStore } from "../store/logStore";
+import { useConnection } from "../hooks/useConnection";
 import {
-  coreStart,
-  coreStop,
   profilesList,
   profilesActive,
   profilesImport,
   profilesRemove,
   profilesSetActive,
   profilePing,
-  traySetState,
   type Profile,
 } from "../api/backend";
 
@@ -22,8 +20,18 @@ const PROTO_ICON: Record<string, string> = {
   wireguard: "🔺",
 };
 
+/** "tcp · reality · vision" — what the profile actually uses, at a glance. */
+function transportLabel(p: Profile): string {
+  const ob = p.outbound;
+  const parts = [ob?.transport?.type ?? "tcp"];
+  if (ob?.tls?.reality?.enabled) parts.push("reality");
+  else if (ob?.tls?.enabled) parts.push("tls");
+  if (ob?.flow) parts.push(ob.flow.replace("xtls-rprx-", ""));
+  return parts.join(" · ");
+}
+
 export default function ProfilesPage() {
-  const { status, setStatus } = useAppStore();
+  const { status, toggle, restart, connected, busy } = useConnection();
   const [profiles, setProfiles] = useState<Profile[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [notice, setNotice] = useState<string>("");
@@ -38,9 +46,6 @@ export default function ProfilesPage() {
       setPings((p) => ({ ...p, [id]: null }));
     }
   }
-
-  const connected = status === "connected";
-  const busy = status === "connecting";
 
   const refresh = useCallback(async () => {
     const [list, active] = await Promise.all([profilesList(), profilesActive()]);
@@ -60,9 +65,13 @@ export default function ProfilesPage() {
     try {
       const res = await profilesImport(text);
       await refresh();
+      const log = useLogStore.getState().add;
+      res.added.forEach((p) => log("app", `Импортирован профиль «${p.name}» (${transportLabel(p)})`));
+      res.errors.forEach((err) => log("warning", `Ссылка не импортирована — ${err}`));
       const parts: string[] = [];
       if (res.added.length) parts.push(`Добавлено: ${res.added.length}`);
-      if (res.errors.length) parts.push(`Ошибок: ${res.errors.length} (${res.errors[0]})`);
+      if (res.errors.length)
+        parts.push(`Не импортировано: ${res.errors.length} — первая причина: ${res.errors[0]} (все причины — во вкладке «Логи»)`);
       setNotice(parts.join(" · ") || "Ничего не найдено");
     } catch (e) {
       setNotice(String(e));
@@ -84,32 +93,16 @@ export default function ProfilesPage() {
   }
 
   async function selectActive(id: string) {
+    if (id === activeId) return;
     await profilesSetActive(id);
     setActiveId(id);
+    // Apply immediately — otherwise the tunnel keeps using the old server.
+    if (connected) await restart();
   }
 
   async function remove(id: string) {
     await profilesRemove(id);
     await refresh();
-  }
-
-  async function toggle() {
-    try {
-      if (connected) {
-        setStatus("disconnected");
-        await coreStop();
-        await traySetState("idle");
-      } else {
-        setStatus("connecting");
-        await coreStart();
-        setStatus("connected");
-        await traySetState("connected");
-      }
-    } catch (e) {
-      setNotice(String(e));
-      setStatus("error");
-      await traySetState("error").catch(() => {});
-    }
   }
 
   const active = profiles.find((p) => p.id === activeId) || null;
@@ -131,14 +124,15 @@ export default function ProfilesPage() {
             <div style={{ fontWeight: 600, marginBottom: 4 }}>Активное подключение</div>
             <div className="muted">
               {active
-                ? `${PROTO_ICON[active.protocol] ?? "•"} ${active.name} — ${active.server}:${active.port}`
+                ? `${PROTO_ICON[active.protocol] ?? "•"} ${active.name} — ${active.server}:${active.port} (${transportLabel(active)})`
                 : "Профиль не выбран — добавьте сервер или вставьте ссылку из буфера"}
             </div>
           </div>
           <button
             className={`btn ${connected ? "" : "primary"}`}
-            onClick={toggle}
+            onClick={() => toggle()}
             disabled={busy || (!active && !connected)}
+            title={status === "error" ? "Причина ошибки — под статусом слева и во вкладке «Логи»" : undefined}
           >
             {connected ? "Отключить" : busy ? "Подключение…" : "Подключить"}
           </button>
@@ -188,7 +182,7 @@ export default function ProfilesPage() {
               <div style={{ flex: 1, minWidth: 0 }}>
                 <div style={{ fontWeight: 550 }}>{p.name}</div>
                 <div className="muted" style={{ fontSize: 12 }}>
-                  {p.protocol} · {p.server}:{p.port}
+                  {p.protocol} · {p.server}:{p.port} · {transportLabel(p)}
                 </div>
               </div>
               <span

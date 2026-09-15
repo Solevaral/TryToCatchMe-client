@@ -20,6 +20,9 @@ pub struct Profile {
     pub port: u16,
     /// sing-box outbound object (without the "tag" field).
     pub outbound: Value,
+    /// The original share link, kept so profiles can be re-parsed after fixes.
+    #[serde(default)]
+    pub link: Option<String>,
 }
 
 impl Profile {
@@ -31,6 +34,7 @@ impl Profile {
             server,
             port,
             outbound,
+            link: None,
         }
     }
 }
@@ -80,6 +84,12 @@ fn extract_links(text: &str) -> Vec<String> {
 
 pub fn parse_link(raw: &str) -> Result<Profile, String> {
     let raw = raw.trim();
+    let mut profile = parse_scheme(raw)?;
+    profile.link = Some(raw.to_string());
+    Ok(profile)
+}
+
+fn parse_scheme(raw: &str) -> Result<Profile, String> {
     let scheme = raw.split_once("://").map(|(s, _)| s.to_lowercase());
     match scheme.as_deref() {
         Some("vless") => parse_vless(raw),
@@ -122,7 +132,7 @@ fn parse_vless(raw: &str) -> Result<Profile, String> {
     if security == "tls" || security == "reality" {
         ob["tls"] = build_tls(&q, &server, security == "reality");
     }
-    if let Some(tr) = build_transport(&q, &server) {
+    if let Some(tr) = build_transport(&q, &server)? {
         ob["transport"] = tr;
     }
     ensure_grpc_alpn(&mut ob, &q);
@@ -193,7 +203,16 @@ fn parse_vmess(raw: &str) -> Result<Profile, String> {
             }
             ob["transport"] = h;
         }
-        _ => {}
+        "httpupgrade" => {
+            let mut hu = json!({ "type": "httpupgrade", "path": path });
+            if !host_hdr.is_empty() {
+                hu["host"] = json!(host_hdr);
+            }
+            ob["transport"] = hu;
+        }
+        "quic" => ob["transport"] = json!({ "type": "quic" }),
+        "" | "tcp" | "raw" => {}
+        other => return Err(unsupported_transport(other)),
     }
 
     Ok(Profile::new(name, "vmess", server, port, ob))
@@ -264,7 +283,7 @@ fn parse_trojan(raw: &str) -> Result<Profile, String> {
     });
     // Trojan is TLS by default.
     ob["tls"] = build_tls(&q, &server, false);
-    if let Some(tr) = build_transport(&q, &server) {
+    if let Some(tr) = build_transport(&q, &server)? {
         ob["transport"] = tr;
     }
     ensure_grpc_alpn(&mut ob, &q);
@@ -299,11 +318,15 @@ fn build_tls(q: &HashMap<String, String>, server: &str, reality: bool) -> Value 
     tls
 }
 
-fn build_transport(q: &HashMap<String, String>, server: &str) -> Option<Value> {
+/// Map a share-link transport to a sing-box transport. Plain TCP => `Ok(None)`.
+/// Transports the sing-box core can't speak (e.g. Xray's xhttp) are an error, so
+/// the user sees why instead of getting a silently broken TCP profile.
+fn build_transport(q: &HashMap<String, String>, server: &str) -> Result<Option<Value>, String> {
     let net = q.get("type").map(|s| s.as_str()).unwrap_or("tcp");
     let host_hdr = q.get("host").filter(|s| !s.is_empty()).cloned();
     let path = q.get("path").cloned().unwrap_or_else(|| "/".to_string());
-    match net {
+    Ok(match net {
+        "" | "tcp" | "raw" => None,
         "ws" => {
             let mut ws = json!({ "type": "ws", "path": path });
             if let Some(h) = host_hdr.or_else(|| Some(server.to_string())) {
@@ -335,8 +358,15 @@ fn build_transport(q: &HashMap<String, String>, server: &str) -> Option<Value> {
             }
             Some(hu)
         }
-        _ => None,
-    }
+        "quic" => Some(json!({ "type": "quic" })),
+        other => return Err(unsupported_transport(other)),
+    })
+}
+
+fn unsupported_transport(net: &str) -> String {
+    format!(
+        "транспорт «{net}» не поддерживается ядром sing-box (поддерживаются tcp, ws, grpc, http, httpupgrade, quic)"
+    )
 }
 
 /// gRPC over TLS needs the h2 ALPN; add it when the link didn't specify one.
@@ -447,6 +477,19 @@ mod tests {
         assert_eq!(p.port, 443);
         assert_eq!(p.outbound["transport"]["type"], "ws");
         assert_eq!(p.outbound["tls"]["enabled"], true);
+    }
+
+    #[test]
+    fn unsupported_transport_is_a_clear_error() {
+        let link = "vless://11111111-1111-1111-1111-111111111111@h.net:8443?security=reality&pbk=K&sid=ab&type=xhttp&path=/x#xh";
+        let err = parse_link(link).err().expect("xhttp must not import as tcp");
+        assert!(err.contains("xhttp"));
+    }
+
+    #[test]
+    fn link_is_kept_for_reparsing() {
+        let link = "trojan://pass@host.net:443?sni=host.net#t";
+        assert_eq!(parse_link(link).unwrap().link.as_deref(), Some(link));
     }
 
     #[test]

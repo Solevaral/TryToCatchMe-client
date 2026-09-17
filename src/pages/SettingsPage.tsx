@@ -181,6 +181,22 @@ export default function SettingsPage() {
             <label style={{ display: "flex", gap: 10, alignItems: "flex-start" }}>
               <input
                 type="checkbox"
+                checked={settings.verbose_logs}
+                onChange={(e) => patch({ verbose_logs: e.target.checked })}
+              />
+              <span>
+                Подробные логи ядра
+                <div className="muted" style={{ fontSize: 12 }}>
+                  В «Логи» попадёт каждое соединение. В режиме TUN это тысячи строк в
+                  секунду: ядро сильнее грузит процессор, а окно приложения — память.
+                  Включайте только для разбора проблемы. Обычно достаточно
+                  предупреждений и ошибок, они пишутся всегда.
+                </div>
+              </span>
+            </label>
+            <label style={{ display: "flex", gap: 10, alignItems: "flex-start" }}>
+              <input
+                type="checkbox"
                 checked={settings.auto_switch}
                 onChange={(e) => patch({ auto_switch: e.target.checked })}
               />

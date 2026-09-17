@@ -32,6 +32,11 @@ pub struct Settings {
     /// Local proxy port the system proxy points at (geo downloads use port + 1).
     #[serde(default = "default_proxy_port")]
     pub proxy_port: u16,
+    /// Log every connection (core log level `info`). Thousands of lines per second in
+    /// TUN mode: costs CPU in the core and memory in the log console, so it's off by
+    /// default and only the core's warnings and errors are streamed.
+    #[serde(default)]
+    pub verbose_logs: bool,
 }
 
 impl Default for Settings {
@@ -42,6 +47,7 @@ impl Default for Settings {
             auto_switch: false,
             capture_tun: false,
             proxy_port: default_proxy_port(),
+            verbose_logs: false,
         }
     }
 }

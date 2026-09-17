@@ -200,6 +200,8 @@ impl CoreState {
             dns_doh: settings.dns_doh,
             block_quic: settings.block_quic,
             tun,
+            // `info` logs every connection — real CPU cost in TUN mode.
+            log_level: if settings.verbose_logs { "info".into() } else { "warn".into() },
             ..GenOptions::default()
         };
         let write_cfg = |opts: &GenOptions| -> Result<(), String> {
@@ -536,8 +538,9 @@ fn strip_ansi(s: &str) -> String {
     out
 }
 
-/// Stream a child pipe line-by-line into the log console via the `clash://log` event,
-/// keeping the last lines so a startup failure can quote the real reason.
+/// Read a child pipe line-by-line, keeping the last lines so a startup failure can
+/// quote the real reason. Only errors reach the log console: everything else already
+/// arrives over the Clash API log stream, and emitting both doubles the flood.
 fn pipe_logs<R: Read + Send + 'static>(app: AppHandle, reader: R, tail: LogTail) {
     std::thread::spawn(move || {
         let buf = BufReader::new(reader);
@@ -561,9 +564,11 @@ fn pipe_logs<R: Read + Send + 'static>(app: AppHandle, reader: R, tail: LogTail)
             } else {
                 "info"
             };
-            let payload =
-                serde_json::json!({ "type": level, "payload": line }).to_string();
-            let _ = app.emit("clash://log", payload);
+            if level == "error" {
+                let payload =
+                    serde_json::json!({ "type": level, "payload": line }).to_string();
+                let _ = app.emit("clash://log", payload);
+            }
         }
     });
 }

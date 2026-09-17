@@ -71,6 +71,9 @@ installer and a Linux AppImage.
 
 ### App
 - Live up/down speed and a real-time, filterable log console (core + app events).
+- **Quiet by default** — the core only reports warnings and errors; a "verbose logs"
+  switch streams every connection for troubleshooting (thousands of lines a second in
+  TUN mode, so the UI batches them and drops the overflow).
 - Connect / disconnect / restart from the sidebar; connect, disconnect and diagnostics
   from the tray, whose icon reflects the connection state; close-to-tray; autostart;
   dark theme.

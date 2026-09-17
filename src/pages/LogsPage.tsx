@@ -27,6 +27,9 @@ export default function LogsPage() {
   const [autoscroll, setAutoscroll] = useState(true);
   const boxRef = useRef<HTMLDivElement>(null);
 
+  // Rendering thousands of lines on every batch is what makes the window crawl.
+  const RENDER_MAX = 400;
+
   const filtered = useMemo(() => {
     const needle = q.trim().toLowerCase();
     return logs.filter((l) => {
@@ -35,6 +38,8 @@ export default function LogsPage() {
       return true;
     });
   }, [logs, level, q]);
+
+  const shown = filtered.length > RENDER_MAX ? filtered.slice(filtered.length - RENDER_MAX) : filtered;
 
   useEffect(() => {
     if (autoscroll && boxRef.current) {
@@ -108,12 +113,18 @@ export default function LogsPage() {
           padding: 12,
         }}
       >
+        {filtered.length > shown.length && (
+          <div className="muted" style={{ marginBottom: 6 }}>
+            …показаны последние {RENDER_MAX} строк из {filtered.length}. Кнопка «Скопировать»
+            копирует все.
+          </div>
+        )}
         {filtered.length === 0 ? (
           <div className="muted">
             Логов пока нет. Подключитесь — здесь появится живой поток от ядра sing-box.
           </div>
         ) : (
-          filtered.map((l, i) => (
+          shown.map((l, i) => (
             <div key={i} style={{ whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
               <span className="muted">{ts(l.t)}</span>{" "}
               <span style={{ color: LEVEL_COLOR[l.level] ?? "var(--text-1)" }}>

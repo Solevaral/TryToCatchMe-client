@@ -39,6 +39,8 @@ export interface Settings {
   capture_tun: boolean;
   /** Local proxy port (the system proxy points here; port + 1 is reserved). */
   proxy_port: number;
+  /** Stream every connection from the core into the log console (heavy). */
+  verbose_logs: boolean;
 }
 
 export async function isAdmin(): Promise<boolean> {

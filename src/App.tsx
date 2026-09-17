@@ -34,7 +34,16 @@ function fmtSpeed(bytesPerSec: number): string {
 }
 
 export default function App() {
-  const { page, setPage, status, setStatus, up, down, setTraffic, lastError, setLastError, warm, setWarm } = useAppStore();
+  // Narrow selectors: a traffic tick (once a second) must not re-render the page.
+  const page = useAppStore((s) => s.page);
+  const setPage = useAppStore((s) => s.setPage);
+  const status = useAppStore((s) => s.status);
+  const setStatus = useAppStore((s) => s.setStatus);
+  const setTraffic = useAppStore((s) => s.setTraffic);
+  const lastError = useAppStore((s) => s.lastError);
+  const setLastError = useAppStore((s) => s.setLastError);
+  const warm = useAppStore((s) => s.warm);
+  const setWarm = useAppStore((s) => s.setWarm);
 
   // Sync status from the core at startup (window may have been reopened from tray).
   useEffect(() => {
@@ -103,11 +112,17 @@ export default function App() {
         window.dispatchEvent(new CustomEvent("ttcm:run-diagnostics"));
       })
     );
+    // The core sends log lines in batches (one event per line floods the webview).
     unlisteners.push(
       listen<string>("clash://log", (e) => {
         try {
-          const l = JSON.parse(e.payload) as { type?: string; payload?: string };
-          useLogStore.getState().add(l.type ?? "info", l.payload ?? e.payload);
+          const batch = JSON.parse(e.payload) as Array<{ type?: string; payload?: string }>;
+          useLogStore.getState().addMany(
+            (Array.isArray(batch) ? batch : [batch]).map((l) => ({
+              level: l.type ?? "info",
+              msg: l.payload ?? "",
+            }))
+          );
         } catch {
           useLogStore.getState().add("info", e.payload);
         }
@@ -196,19 +211,23 @@ export default function App() {
             </div>
           )}
           <SysProxyLine connected={status === "connected"} />
-          {status === "connected" && (
-            <div
-              className="muted"
-              style={{ fontSize: 11, marginTop: 8, display: "flex", gap: 10 }}
-            >
-              <span>↑ {fmtSpeed(up)}</span>
-              <span>↓ {fmtSpeed(down)}</span>
-            </div>
-          )}
+          {status === "connected" && <Speed />}
         </div>
       </aside>
 
       <MainContent page={page} />
+    </div>
+  );
+}
+
+/** Own component so the once-a-second traffic tick re-renders only these two numbers. */
+function Speed() {
+  const up = useAppStore((s) => s.up);
+  const down = useAppStore((s) => s.down);
+  return (
+    <div className="muted" style={{ fontSize: 11, marginTop: 8, display: "flex", gap: 10 }}>
+      <span>↑ {fmtSpeed(up)}</span>
+      <span>↓ {fmtSpeed(down)}</span>
     </div>
   );
 }

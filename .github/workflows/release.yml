@@ -10,7 +10,23 @@ permissions:
   contents: write
 
 jobs:
+  # Create the release once up front so the build jobs don't race to create it.
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: "TryToCatchMe ${{ github.ref_name }}"
+          body: |
+            Downloads:
+            - Windows: **TryToCatchMe_..._x64-setup.exe** — installer (bundles the sing-box core + Wintun).
+            - Linux: **TryToCatchMe_..._amd64.AppImage** — portable (`chmod +x` and run).
+          draft: false
+          prerelease: false
+
   build:
+    needs: release
     strategy:
       fail-fast: false
       matrix:
@@ -59,17 +75,33 @@ jobs:
         if: matrix.os == 'ubuntu-22.04'
         run: bash ./scripts/fetch-core.sh
 
-      - name: Build and release
+      - name: Build and upload (Windows)
+        if: matrix.os == 'windows-latest'
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           tagName: ${{ github.ref_name }}
           releaseName: "TryToCatchMe ${{ github.ref_name }}"
-          releaseBody: |
-            Downloads:
-            - Windows: **TryToCatchMe_..._x64-setup.exe** — installer (bundles the sing-box core + Wintun).
-            - Linux: **TryToCatchMe_..._amd64.AppImage** — portable (`chmod +x` and run).
-          releaseDraft: false
-          prerelease: false
           args: --bundles ${{ matrix.bundles }}
+
+      # Linux: build only, then strip host-only libs from the AppImage before uploading.
+      - name: Build (Linux)
+        if: matrix.os == 'ubuntu-22.04'
+        uses: tauri-apps/tauri-action@v0
+        with:
+          args: --bundles ${{ matrix.bundles }}
+
+      - name: Fix AppImage (Linux)
+        if: matrix.os == 'ubuntu-22.04'
+        run: |
+          for f in src-tauri/target/release/bundle/appimage/*.AppImage; do
+            bash ./scripts/fix-appimage.sh "$f"
+          done
+
+      - name: Upload (Linux)
+        if: matrix.os == 'ubuntu-22.04'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          files: src-tauri/target/release/bundle/appimage/*.AppImage

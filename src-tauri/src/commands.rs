@@ -164,6 +164,25 @@ pub fn services_library(app: AppHandle) -> Vec<Service> {
     crate::routing::library_with_updates(&app)
 }
 
+/// «Обновить список» in the service library: download it from GitHub now
+/// (through the VPN when connected).
+#[tauri::command]
+pub async fn services_library_refresh(app: AppHandle) -> GeoRefreshResult {
+    let running = app.state::<CoreState>().status().running;
+    let has_proxy = app.state::<ProfileStore>().active_outbound().is_some();
+    let vpn_port = (running && has_proxy).then(|| app.state::<SettingsStore>().get().proxy_port);
+    match crate::library::refresh_now(&app, vpn_port).await {
+        Ok(n) => GeoRefreshResult { ok: true, message: format!("Список обновлён: {n} сервисов в библиотеке GitHub") },
+        Err(e) => {
+            let mut message = format!("Не удалось обновить список: {e}. Используется сохранённый.");
+            if vpn_port.is_none() {
+                message.push_str(" Подключите VPN и повторите — GitHub может быть недоступен напрямую.");
+            }
+            GeoRefreshResult { ok: false, message }
+        }
+    }
+}
+
 #[derive(serde::Serialize)]
 pub struct GeoRefreshResult {
     pub ok: bool,

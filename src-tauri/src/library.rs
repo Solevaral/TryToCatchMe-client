@@ -112,6 +112,16 @@ async fn update(app: &AppHandle, vpn_port: Option<u16>) -> Result<usize, String>
     Err(last_error)
 }
 
+/// «Обновить список» in the library: download now, regardless of the cache age.
+pub async fn refresh_now(app: &AppHandle, vpn_port: Option<u16>) -> Result<usize, String> {
+    if BUSY.swap(true, Ordering::SeqCst) {
+        return Err("список уже скачивается".into());
+    }
+    let result = update(app, vpn_port).await;
+    BUSY.store(false, Ordering::SeqCst);
+    result
+}
+
 /// Refresh in the background when the cached copy is missing or stale.
 /// `vpn_port` — the local proxy port while connected (download goes through the VPN).
 pub fn schedule(app: &AppHandle, vpn_port: Option<u16>) {

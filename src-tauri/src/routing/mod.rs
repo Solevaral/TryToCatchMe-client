@@ -44,7 +44,7 @@ pub fn library_with_updates(app: &AppHandle) -> Vec<Service> {
 }
 
 /// Bump when built-in service domains change, so stored catalogs pick up additions.
-const PRESETS_VERSION: u32 = 5;
+const PRESETS_VERSION: u32 = 6;
 
 #[derive(Serialize, Deserialize, Clone)]
 struct Persisted {
@@ -105,6 +105,14 @@ fn merge_gemini_into_google(p: &mut Persisted) {
     }
 }
 
+/// v6: Steam is no longer a built-in service (it isn't blocked anywhere yet). Removed from
+/// stored catalogs unless the user routes it; it can be re-added from the library later.
+fn drop_unused_steam(p: &mut Persisted) {
+    if !p.config.services.iter().any(|s| s.id == "steam") {
+        p.catalog.retain(|s| s.id != "steam");
+    }
+}
+
 /// Bring a stored catalog up to date without discarding user edits: built-in services
 /// gain any newly added domains/IPs, and enabled selections that point at services no
 /// longer in the catalog are dropped. Returns true if anything changed.
@@ -114,6 +122,9 @@ fn migrate(p: &mut Persisted) -> bool {
     }
     if p.presets_version < 5 {
         merge_gemini_into_google(p);
+    }
+    if p.presets_version < 6 {
+        drop_unused_steam(p);
     }
     let builtin = library();
     for svc in p.catalog.iter_mut() {

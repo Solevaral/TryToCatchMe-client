@@ -121,20 +121,6 @@
     "ip_cidrs": []
   },
   {
-    "id": "steam",
-    "name": "Steam",
-    "icon": "🎮",
-    "domains": [
-      "steampowered.com",
-      "steamcommunity.com",
-      "steamstatic.com",
-      "steamcontent.com",
-      "steamgames.com",
-      "valvesoftware.com"
-    ],
-    "ip_cidrs": []
-  },
-  {
     "id": "discord",
     "name": "Discord",
     "icon": "💬",

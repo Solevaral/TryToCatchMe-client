@@ -6,6 +6,7 @@ import {
   serviceRemove,
   servicesReset,
   servicesLibrary,
+  servicesLibraryRefresh,
   coreRestart,
   geoRefresh,
   settingsGet,
@@ -392,6 +393,22 @@ function LibraryModal({
 }) {
   const [lib, setLib] = useState<Service[]>([]);
   const [q, setQ] = useState("");
+  const [refreshing, setRefreshing] = useState(false);
+  const [refreshMsg, setRefreshMsg] = useState<{ ok: boolean; text: string } | null>(null);
+
+  const refresh = async () => {
+    setRefreshing(true);
+    setRefreshMsg(null);
+    try {
+      const r = await servicesLibraryRefresh();
+      setRefreshMsg({ ok: r.ok, text: r.message });
+      setLib(await servicesLibrary());
+    } catch (e) {
+      setRefreshMsg({ ok: false, text: String(e) });
+    } finally {
+      setRefreshing(false);
+    }
+  };
 
   useEffect(() => {
     servicesLibrary().then(setLib).catch(console.error);
@@ -449,8 +466,27 @@ function LibraryModal({
       <div className="card" style={{ width: 560, maxHeight: "86vh", display: "flex", flexDirection: "column" }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
           <div style={{ fontWeight: 600 }}>Библиотека сервисов</div>
-          <button className="btn" style={{ padding: "3px 10px" }} onClick={onClose}>✕</button>
+          <div style={{ display: "flex", gap: 6 }}>
+            <button
+              className="btn"
+              style={{ padding: "3px 10px" }}
+              onClick={refresh}
+              disabled={refreshing}
+              title="Список обновляется сам при запуске и после подключения, не чаще раза в 6 часов"
+            >
+              {refreshing ? "Обновление…" : "Обновить список"}
+            </button>
+            <button className="btn" style={{ padding: "3px 10px" }} onClick={onClose}>✕</button>
+          </div>
         </div>
+        {refreshMsg && (
+          <div
+            className={refreshMsg.ok ? "muted" : undefined}
+            style={{ fontSize: 12, marginBottom: 10, color: refreshMsg.ok ? undefined : "var(--err)" }}
+          >
+            {refreshMsg.text}
+          </div>
+        )}
         <input
           value={q}
           onChange={(e) => setQ(e.target.value)}

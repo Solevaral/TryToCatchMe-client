@@ -30,6 +30,19 @@ pub fn library() -> Vec<Service> {
     out
 }
 
+/// The library with the copy downloaded from GitHub on top: its entries replace
+/// built-in ones with the same id, new ones are appended (see `crate::library`).
+pub fn library_with_updates(app: &AppHandle) -> Vec<Service> {
+    let mut out = library();
+    for s in crate::library::cached(app) {
+        match out.iter_mut().find(|x| x.id == s.id) {
+            Some(existing) => *existing = s,
+            None => out.push(s),
+        }
+    }
+    out
+}
+
 /// Bump when built-in service domains change, so stored catalogs pick up additions.
 const PRESETS_VERSION: u32 = 5;
 

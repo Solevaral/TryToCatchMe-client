@@ -28,5 +28,6 @@
   {"id": "figma", "name": "Figma", "icon": "🎨", "domains": ["figma.com"], "ip_cidrs": []},
   {"id": "dropbox", "name": "Dropbox", "icon": "🗄️", "domains": ["dropbox.com", "dropboxusercontent.com", "dropboxstatic.com"], "ip_cidrs": []},
   {"id": "epicgames", "name": "Epic Games", "icon": "🕹️", "domains": ["epicgames.com", "unrealengine.com", "helpshift.com"], "ip_cidrs": []},
-  {"id": "riot", "name": "Riot Games", "icon": "⚔️", "domains": ["riotgames.com", "leagueoflegends.com", "valorant.com"], "ip_cidrs": []}
+  {"id": "riot", "name": "Riot Games", "icon": "⚔️", "domains": ["riotgames.com", "leagueoflegends.com", "valorant.com"], "ip_cidrs": []},
+  {"id": "duolingo", "name": "Duolingo", "icon": "🦉", "domains": ["duolingo.com", "cloudfront.net"], "ip_cidrs": []}
 ]

@@ -16,6 +16,7 @@ pub mod core;
 pub mod diag;
 pub mod geo;
 pub mod hostlink;
+pub mod library;
 pub mod platform;
 pub mod monitor;
 pub mod profiles;
@@ -75,6 +76,8 @@ pub fn run() {
                     let _ = tauri::Emitter::emit(&handle, "app://log", msg);
                 });
             }
+            // Service library from GitHub (directly; after connecting — through the VPN).
+            library::schedule(app.handle(), None);
             // System tray (starts in the idle/blue state) — also under the All in One host.
             tray::build(app.handle())?;
             if host_args.hosted {

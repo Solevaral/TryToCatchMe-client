@@ -3,6 +3,7 @@ import { enable, disable, isEnabled } from "@tauri-apps/plugin-autostart";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import {
   getVersion,
+  isHosted,
   settingsGet,
   settingsSet,
   type Settings,
@@ -11,11 +12,13 @@ import {
 export default function SettingsPage() {
   const [version, setVersion] = useState<string>("…");
   const [autostart, setAutostart] = useState<boolean | null>(null);
+  const [hosted, setHosted] = useState(false);
   const [settings, setSettings] = useState<Settings | null>(null);
 
   useEffect(() => {
     getVersion().then(setVersion).catch(() => setVersion("н/д"));
     isEnabled().then(setAutostart).catch(() => setAutostart(null));
+    isHosted().then(setHosted).catch(() => setHosted(false));
     settingsGet().then(setSettings).catch(() => setSettings(null));
   }, []);
 
@@ -87,15 +90,21 @@ export default function SettingsPage() {
 
       <div className="card" style={{ marginBottom: 18 }}>
         <div style={{ fontWeight: 600, marginBottom: 10 }}>Запуск</div>
-        <label style={{ display: "flex", gap: 10, alignItems: "center" }}>
-          <input
-            type="checkbox"
-            checked={!!autostart}
-            disabled={autostart === null}
-            onChange={toggleAutostart}
-          />
-          Запускать при входе в систему (свёрнуто в трей)
-        </label>
+        {hosted ? (
+          <div style={{ opacity: 0.75 }}>
+            Запуском управляет All in One: галочка «Запускать вместе с All in One» на странице модуля.
+          </div>
+        ) : (
+          <label style={{ display: "flex", gap: 10, alignItems: "center" }}>
+            <input
+              type="checkbox"
+              checked={!!autostart}
+              disabled={autostart === null}
+              onChange={toggleAutostart}
+            />
+            Запускать при входе в систему (свёрнуто в трей)
+          </label>
+        )}
       </div>
 
       <div className="card" style={{ marginBottom: 18 }}>

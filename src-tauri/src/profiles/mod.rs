@@ -68,6 +68,13 @@ impl ProfileStore {
         self.inner.lock().active.clone()
     }
 
+    /// The active profile's display name (no server details), for the host tile.
+    pub fn active_name(&self) -> Option<String> {
+        let g = self.inner.lock();
+        let active = g.active.as_ref()?;
+        g.profiles.iter().find(|p| &p.id == active).map(|p| p.name.clone())
+    }
+
     /// Parse text (links or subscription) and add the resulting profiles.
     pub fn import(&self, app: &AppHandle, text: &str) -> ImportResult {
         let (parsed, errors) = links::parse_many(text);

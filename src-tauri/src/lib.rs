@@ -15,6 +15,7 @@ pub mod commands;
 pub mod core;
 pub mod diag;
 pub mod geo;
+pub mod hostlink;
 pub mod platform;
 pub mod monitor;
 pub mod profiles;
@@ -35,7 +36,14 @@ use tauri::Manager;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    let host_args = hostlink::parse_args();
+    let hide_window = host_args.hosted || host_args.minimized;
+
     tauri::Builder::default()
+        // Must be first: a second launch just brings the running window forward.
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            tray::show_main(app);
+        }))
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_autostart::init(
@@ -50,7 +58,8 @@ pub fn run() {
         .manage(monitor::Monitor::default())
         .manage(sysproxy::SysProxyState::default())
         .manage(tray::TrayMenu::default())
-        .setup(|app| {
+        .manage(hostlink::HostLink::default())
+        .setup(move |app| {
             // Load saved profiles + routing + settings from disk at startup.
             let store = app.state::<ProfileStore>();
             store.load(app.handle());
@@ -66,8 +75,17 @@ pub fn run() {
                     let _ = tauri::Emitter::emit(&handle, "app://log", msg);
                 });
             }
-            // System tray (starts in the idle/blue state).
+            // System tray (starts in the idle/blue state) — also under the All in One host.
             tray::build(app.handle())?;
+            if host_args.hosted {
+                // Under the All in One host: it also drives the app over a pipe.
+                hostlink::start(app.handle().clone(), host_args.pipe.clone());
+            }
+            // The window starts hidden (tauri.conf.json); show it unless launched by
+            // autostart (--minimized) or by the host (it opens the window on demand).
+            if !hide_window {
+                tray::show_main(app.handle());
+            }
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -79,6 +97,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::app_version,
+            commands::is_hosted,
             commands::core_start,
             commands::core_stop,
             commands::core_restart,

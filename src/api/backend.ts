@@ -30,6 +30,11 @@ export async function getVersion(): Promise<string> {
   return await invoke<string>("app_version");
 }
 
+/** Running under the All in One host — it owns autostart. */
+export async function isHosted(): Promise<boolean> {
+  return await invoke<boolean>("is_hosted");
+}
+
 // ---- settings ----
 
 export interface Settings {

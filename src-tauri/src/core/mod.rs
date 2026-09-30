@@ -265,6 +265,7 @@ impl CoreState {
         if !geo_files.is_empty() {
             schedule_geo(app, geo_files, proxy_outbound.is_some().then_some(port), geo_missing);
         }
+        crate::library::schedule(app, proxy_outbound.is_some().then_some(port));
         Ok(())
     }
 

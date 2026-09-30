@@ -160,8 +160,8 @@ pub fn services_reset(app: AppHandle, store: State<'_, RoutingStore>) {
 
 /// The large read-only service library the user can add presets from.
 #[tauri::command]
-pub fn services_library() -> Vec<Service> {
-    crate::routing::library()
+pub fn services_library(app: AppHandle) -> Vec<Service> {
+    crate::routing::library_with_updates(&app)
 }
 
 #[derive(serde::Serialize)]

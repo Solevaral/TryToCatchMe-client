@@ -117,6 +117,7 @@ pub fn run() {
             commands::service_remove,
             commands::services_reset,
             commands::services_library,
+            commands::services_library_refresh,
             commands::geo_refresh,
             commands::sysproxy_status,
             commands::sysproxy_reapply,

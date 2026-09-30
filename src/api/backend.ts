@@ -181,6 +181,11 @@ export async function servicesLibrary(): Promise<Service[]> {
   return await invoke<Service[]>("services_library");
 }
 
+/** Download the service library from GitHub now (it also updates itself every 6 h). */
+export async function servicesLibraryRefresh(): Promise<GeoRefreshResult> {
+  return await invoke<GeoRefreshResult>("services_library_refresh");
+}
+
 export interface GeoRefreshResult {
   ok: boolean;
   message: string;

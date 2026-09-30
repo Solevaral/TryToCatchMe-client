@@ -6,6 +6,9 @@
 //!   • Диагностика — shows the window and asks the UI to run diagnostics
 //!   • Выйти — stops the core first (reverts the OS system proxy) then exits,
 //!     so no dead proxy fallback is left behind.
+//!
+//! Under the All in One host (`--hosted`) the tray stays; the host also drives the same
+//! connect / disconnect / quit functions over `hostlink`.
 
 use parking_lot::Mutex;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
@@ -75,41 +78,52 @@ pub fn set_state(app: &AppHandle, state: &str) {
         let label = if state == "idle" { "Подключить" } else { "Отключить" };
         let _ = item.set_text(label);
     }
+    crate::hostlink::notify_state(app);
 }
 
 /// Toggle the VPN from the tray, mirroring the UI's connect/disconnect flow.
 fn toggle_vpn(app: &AppHandle) {
-    let core = app.state::<CoreState>();
-    let clash = app.state::<ClashStreams>();
-    if core.status().running {
-        app.state::<crate::monitor::Monitor>().stop();
-        clash.stop();
-        let _ = core.stop(app);
-        set_state(app, "idle");
-        let _ = app.emit("vpn://state", "idle");
+    if app.state::<CoreState>().status().running {
+        disconnect(app);
     } else {
-        // Starting blocks until the core is up — do it off the event-loop thread so
-        // the window and tray stay responsive.
-        let app = app.clone();
-        let _ = app.emit("vpn://state", "connecting");
-        std::thread::spawn(move || match app.state::<CoreState>().start(&app) {
-            Ok(()) => {
-                app.state::<ClashStreams>().start(app.clone());
-                app.state::<crate::monitor::Monitor>().start(app.clone());
-                set_state(&app, "connected");
-                let _ = app.emit("vpn://state", "connected");
-            }
-            Err(e) => {
-                set_state(&app, "error");
-                let _ = app.emit("vpn://state", "error");
-                let _ = app.emit("app://error", format!("Не удалось подключиться: {e}"));
-            }
-        });
+        connect(app);
     }
 }
 
+/// Connect with the active profile. Starting blocks until the core is up — do it off the
+/// event-loop thread so the window and tray stay responsive.
+pub(crate) fn connect(app: &AppHandle) {
+    if app.state::<CoreState>().status().running {
+        return;
+    }
+    let app = app.clone();
+    let _ = app.emit("vpn://state", "connecting");
+    std::thread::spawn(move || match app.state::<CoreState>().start(&app) {
+        Ok(()) => {
+            app.state::<ClashStreams>().start(app.clone());
+            app.state::<crate::monitor::Monitor>().start(app.clone());
+            set_state(&app, "connected");
+            let _ = app.emit("vpn://state", "connected");
+        }
+        Err(e) => {
+            set_state(&app, "error");
+            let _ = app.emit("vpn://state", "error");
+            let _ = app.emit("app://error", format!("Не удалось подключиться: {e}"));
+        }
+    });
+}
+
+/// Disconnect: stop failover, streams and the core (reverts the OS system proxy).
+pub(crate) fn disconnect(app: &AppHandle) {
+    app.state::<crate::monitor::Monitor>().stop();
+    app.state::<ClashStreams>().stop();
+    let _ = app.state::<CoreState>().stop(app);
+    set_state(app, "idle");
+    let _ = app.emit("vpn://state", "idle");
+}
+
 /// Stop the core (reverts the OS system proxy) then exit — no dead fallback.
-fn quit_app(app: &AppHandle) {
+pub(crate) fn quit_app(app: &AppHandle) {
     let clash = app.state::<ClashStreams>();
     clash.stop();
     app.state::<crate::monitor::Monitor>().stop();
@@ -118,7 +132,7 @@ fn quit_app(app: &AppHandle) {
     app.exit(0);
 }
 
-fn show_main(app: &AppHandle) {
+pub(crate) fn show_main(app: &AppHandle) {
     if let Some(w) = app.get_webview_window("main") {
         let _ = w.show();
         let _ = w.unminimize();

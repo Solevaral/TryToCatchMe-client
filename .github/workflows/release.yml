@@ -21,6 +21,7 @@ jobs:
           body: |
             Downloads:
             - Windows: **TryToCatchMe_..._x64-setup.exe** — installer (bundles the sing-box core + Wintun).
+            - Windows: **TryToCatchMe_..._x64-AllInOne.zip** — no installer: the exe with the core, used by the All in One launcher.
             - Linux: **TryToCatchMe_..._amd64.AppImage** — portable (`chmod +x` and run).
           draft: false
           prerelease: false
@@ -84,6 +85,26 @@ jobs:
           tagName: ${{ github.ref_name }}
           releaseName: "TryToCatchMe ${{ github.ref_name }}"
           args: --bundles ${{ matrix.bundles }}
+
+      # Zip for the All in One launcher (unpacked into modules/TryToCatchMe): the exe with the core next to it
+      # in the installer's layout, so the resource lookup finds binaries\sing-box.exe.
+      - name: All in One zip (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          $dir = "portable"
+          New-Item -ItemType Directory -Force "$dir/binaries" | Out-Null
+          Copy-Item src-tauri/target/release/trytocatchme.exe "$dir/TryToCatchMe.exe"
+          Copy-Item src-tauri/binaries/sing-box.exe, src-tauri/binaries/wintun.dll "$dir/binaries/"
+          Compress-Archive -Path "$dir/*" -DestinationPath "TryToCatchMe_${version}_x64-AllInOne.zip"
+
+      - name: Upload All in One zip (Windows)
+        if: matrix.os == 'windows-latest'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          files: TryToCatchMe_*_x64-AllInOne.zip
 
       # Linux: build only, then strip host-only libs from the AppImage before uploading.
       - name: Build (Linux)

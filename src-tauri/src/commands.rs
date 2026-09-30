@@ -16,6 +16,12 @@ pub fn app_version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
 }
 
+/// Running under the All in One host: it owns autostart, so the UI hides that toggle.
+#[tauri::command]
+pub fn is_hosted(link: State<'_, crate::hostlink::HostLink>) -> bool {
+    link.is_hosted()
+}
+
 // ---- core ----
 
 /// Run a blocking core operation off the UI thread; any failure is also written to

@@ -11,10 +11,16 @@ installer and a Linux AppImage.
 ## Features
 
 ### Profiles
-- **Import from clipboard** — paste `vless://`, `vmess://`, `ss://`, `trojan://` links
-  or a base64 subscription blob and get ready-to-use profiles.
+- **Import from clipboard** — paste `vless://`, `vmess://`, `ss://`, `trojan://`,
+  `hysteria2://` links or a base64 subscription blob and get ready-to-use profiles.
+- **Subscriptions by URL** — paste a provider's `https://…` subscription link: the
+  servers are downloaded (through the VPN when connected), shown with traffic and
+  expiry from the panel, and replaced by «Обновить» — servers that stay in the list
+  keep their identity, so the active profile and per-service pins survive updates.
+  The request carries a stable random `x-hwid`, so panels with a device limit
+  (Remnawave and others) return real servers instead of an "App not supported" stub.
 - VLESS + Reality / TLS, VMess, Trojan, Shadowsocks (SIP002) with TCP, WebSocket,
-  gRPC, HTTP/2, HTTPUpgrade and QUIC transports.
+  gRPC, HTTP/2, HTTPUpgrade and QUIC transports; Hysteria2 (incl. Salamander obfs).
 - Latency test per profile, one active profile, links kept for re-parsing.
 - **Auto-failover** — switches to the next profile when the active server stops
   passing traffic.

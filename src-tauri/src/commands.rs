@@ -5,7 +5,7 @@ use crate::clash::ClashStreams;
 use crate::core::{CoreState, CoreStatus};
 use crate::diag::{self, DiagInput, DiagReport};
 use crate::links::Profile;
-use crate::profiles::{ImportResult, ProfileStore};
+use crate::profiles::{ImportResult, ProfileStore, Subscription};
 use crate::routing::{RoutingSnapshot, RoutingStore};
 use crate::settings::{Settings, SettingsStore};
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -93,13 +93,47 @@ pub fn profiles_active(store: State<'_, ProfileStore>) -> Option<String> {
     store.active_id()
 }
 
+/// Links / a base64 blob are parsed as is; a single https:// URL is a subscription
+/// that is downloaded and kept for updates.
 #[tauri::command]
-pub fn profiles_import(
-    app: AppHandle,
-    store: State<'_, ProfileStore>,
-    text: String,
-) -> ImportResult {
-    store.import(&app, &text)
+pub async fn profiles_import(app: AppHandle, text: String) -> ImportResult {
+    match ttcm_core::subscription::as_url(&text) {
+        Some(url) => import_subscription(&app, &url).await,
+        None => app.state::<ProfileStore>().import(&app, &text),
+    }
+}
+
+/// The local proxy port while connected with a profile (downloads then go through the VPN).
+fn vpn_port(app: &AppHandle) -> Option<u16> {
+    let running = app.state::<CoreState>().status().running;
+    let has_proxy = app.state::<ProfileStore>().active_outbound().is_some();
+    (running && has_proxy).then(|| app.state::<SettingsStore>().get().proxy_port)
+}
+
+async fn import_subscription(app: &AppHandle, url: &str) -> ImportResult {
+    match crate::subscription::fetch(app, url, vpn_port(app)).await {
+        Ok(fetched) => app.state::<ProfileStore>().apply_subscription(app, url, fetched),
+        Err(e) => ImportResult::error(format!("не удалось скачать подписку: {e}")),
+    }
+}
+
+#[tauri::command]
+pub fn subscriptions_list(store: State<'_, ProfileStore>) -> Vec<Subscription> {
+    store.subscriptions()
+}
+
+/// «Обновить»: download the subscription again and replace its servers.
+#[tauri::command]
+pub async fn subscription_update(app: AppHandle, id: String) -> ImportResult {
+    let Some(url) = app.state::<ProfileStore>().subscription_url(&id) else {
+        return ImportResult::error("подписка не найдена".into());
+    };
+    import_subscription(&app, &url).await
+}
+
+#[tauri::command]
+pub fn subscription_remove(app: AppHandle, store: State<'_, ProfileStore>, id: String) {
+    store.remove_subscription(&app, &id);
 }
 
 #[tauri::command]

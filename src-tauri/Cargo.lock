@@ -4575,6 +4575,7 @@ dependencies = [
  "tokio",
  "tokio-tungstenite",
  "ttcm-core",
+ "uuid",
  "windows-sys 0.60.2",
 ]
 

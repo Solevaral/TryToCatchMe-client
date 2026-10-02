@@ -41,6 +41,7 @@ export interface Settings {
   dns_doh: boolean;
   block_quic: boolean;
   auto_switch: boolean;
+  experimental: boolean;
   capture_tun: boolean;
   /** Local proxy port (the system proxy points here; port + 1 is reserved). */
   proxy_port: number;

@@ -203,20 +203,6 @@ export default function SettingsPage() {
                 </div>
               </span>
             </label>
-            <label style={{ display: "flex", gap: 10, alignItems: "flex-start" }}>
-              <input
-                type="checkbox"
-                checked={settings.auto_switch}
-                onChange={(e) => patch({ auto_switch: e.target.checked })}
-              />
-              <span>
-                Авто-переключение профиля при сбое
-                <div className="muted" style={{ fontSize: 12 }}>
-                  Если активный сервер перестаёт отвечать — автоматически переключаюсь на
-                  следующий профиль. Не помогает, если недоступен сам сайт при живом VPN.
-                </div>
-              </span>
-            </label>
           </div>
         ) : (
           <div className="muted">Загрузка…</div>
@@ -224,6 +210,46 @@ export default function SettingsPage() {
         <div className="muted" style={{ fontSize: 12, marginTop: 12 }}>
           Изменения применяются при следующем подключении (или кнопкой «Перезапустить»).
         </div>
+      </div>
+
+      <div className="card" style={{ marginBottom: 18 }}>
+        <div style={{ fontWeight: 600, marginBottom: 10 }}>Экспериментальные функции</div>
+        {settings ? (
+          <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+            <label style={{ display: "flex", gap: 10, alignItems: "flex-start" }}>
+              <input
+                type="checkbox"
+                checked={settings.experimental}
+                onChange={(e) => patch({ experimental: e.target.checked })}
+              />
+              <span>
+                Включить экспериментальные функции
+                <div className="muted" style={{ fontSize: 12 }}>
+                  Функции, которые могут работать не так, как ожидается.
+                </div>
+              </span>
+            </label>
+            {settings.experimental && (
+              <label style={{ display: "flex", gap: 10, alignItems: "flex-start" }}>
+                <input
+                  type="checkbox"
+                  checked={settings.auto_switch}
+                  onChange={(e) => patch({ auto_switch: e.target.checked })}
+                />
+                <span>
+                  Автопереключение профиля при сбое
+                  <div className="muted" style={{ fontSize: 12 }}>
+                    Активный сервер перестал отвечать или пропал из подписки — подключение
+                    к следующему профилю без уведомления. Не помогает, если недоступен сам
+                    сайт при живом VPN.
+                  </div>
+                </span>
+              </label>
+            )}
+          </div>
+        ) : (
+          <div className="muted">Загрузка…</div>
+        )}
       </div>
 
       <div className="card" style={{ marginBottom: 18 }}>

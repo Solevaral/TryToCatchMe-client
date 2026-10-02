@@ -92,7 +92,7 @@ fn run_loop(app: AppHandle, stop: Arc<AtomicBool>) {
         if !app.state::<CoreState>().status().running {
             continue;
         }
-        if !app.state::<SettingsStore>().get().auto_switch {
+        if !app.state::<SettingsStore>().get().auto_switch_on() {
             fails = 0;
             continue;
         }
@@ -113,10 +113,8 @@ fn run_loop(app: AppHandle, stop: Arc<AtomicBool>) {
         let profiles = app.state::<ProfileStore>();
         if let Some(next) = profiles.next_active_id() {
             let name = profiles.name_of(&next).unwrap_or_else(|| next.clone());
-            let _ = app.emit(
-                "app://error",
-                format!("Активный профиль недоступен — переключаюсь на «{name}»"),
-            );
+            // Только в журнал: экспериментальная функция, без уведомлений.
+            let _ = app.emit("app://log", format!("Автопереключение: активный профиль недоступен, переключаюсь на «{name}»"));
             profiles.set_active(&app, Some(next));
             app.state::<ClashStreams>().stop();
             match app.state::<CoreState>().restart(&app) {

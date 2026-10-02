@@ -112,7 +112,10 @@ fn vpn_port(app: &AppHandle) -> Option<u16> {
 
 async fn import_subscription(app: &AppHandle, url: &str) -> ImportResult {
     match crate::subscription::fetch(app, url, vpn_port(app)).await {
-        Ok(fetched) => app.state::<ProfileStore>().apply_subscription(app, url, fetched),
+        Ok(fetched) => {
+            let auto_switch = app.state::<SettingsStore>().get().auto_switch_on();
+            app.state::<ProfileStore>().apply_subscription(app, url, fetched, auto_switch)
+        }
         Err(e) => ImportResult::error(format!("не удалось скачать подписку: {e}")),
     }
 }

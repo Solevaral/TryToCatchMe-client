@@ -136,7 +136,7 @@ impl ProfileStore {
     /// added. Servers that are still in the list keep their profile id (so the active
     /// profile and services pinned to it survive the update). A download with no
     /// usable servers leaves the old ones in place.
-    pub fn apply_subscription(&self, app: &AppHandle, url: &str, fetched: Fetched) -> ImportResult {
+    pub fn apply_subscription(&self, app: &AppHandle, url: &str, fetched: Fetched, auto_switch: bool) -> ImportResult {
         let (mut parsed, mut errors) = sub::parse_body(&fetched.body);
         if parsed.is_empty() {
             if errors.is_empty() {
@@ -191,7 +191,7 @@ impl ProfileStore {
                 .active
                 .as_ref()
                 .and_then(|a| g.profiles.iter().find(|p| &p.id == a))
-                .map(|p| p.outbound.clone());
+                .map(|p| (p.outbound.clone(), p.name.clone()));
             // New servers take the place of the old ones in the list.
             let pos = g
                 .profiles
@@ -204,12 +204,21 @@ impl ProfileStore {
 
             let active_now = g.active.as_ref().and_then(|a| g.profiles.iter().find(|p| &p.id == a));
             active_changed = match (&active_before, active_now) {
-                (Some(before), Some(now)) => before != &now.outbound,
-                (Some(_), None) => true,
+                // Тот же сервер с новыми параметрами — переподключение применит их.
+                (Some((before, _)), Some(now)) => before != &now.outbound,
+                // Сервер пропал: переключение на другой — только с автопереключением
+                // (экспериментальная функция). Иначе туннель работает со старыми
+                // параметрами, пока пользователь не выберет сервер сам.
+                (Some(_), None) => auto_switch,
                 (None, _) => false,
             };
             if active_now.is_none() {
-                g.active = g.profiles.first().map(|p| p.id.clone());
+                if auto_switch || active_before.is_none() {
+                    g.active = g.profiles.first().map(|p| p.id.clone());
+                } else if let Some((_, name)) = &active_before {
+                    g.active = None;
+                    errors.push(format!("сервер «{name}», выбранный для подключения, пропал из подписки — выберите другой сервер"));
+                }
             }
         }
         let _ = self.save(app);

@@ -23,9 +23,13 @@ pub struct Settings {
     /// Block QUIC / UDP:443.
     #[serde(default)]
     pub block_quic: bool,
-    /// Auto-switch to the next profile when the active one fails.
+    /// Auto-switch to the next profile when the active one fails. Works only with
+    /// `experimental` on.
     #[serde(default)]
     pub auto_switch: bool,
+    /// Experimental features (auto-switch between profiles).
+    #[serde(default)]
+    pub experimental: bool,
     /// TUN capture mode (all system traffic via a virtual adapter; needs admin).
     #[serde(default)]
     pub capture_tun: bool,
@@ -45,6 +49,7 @@ impl Default for Settings {
             dns_doh: true,
             block_quic: false,
             auto_switch: false,
+            experimental: false,
             capture_tun: false,
             proxy_port: default_proxy_port(),
             verbose_logs: false,
@@ -55,6 +60,13 @@ impl Default for Settings {
 #[derive(Default)]
 pub struct SettingsStore {
     inner: Mutex<Settings>,
+}
+
+impl Settings {
+    /// Auto-switch is an experimental feature: off unless both toggles are on.
+    pub fn auto_switch_on(&self) -> bool {
+        self.experimental && self.auto_switch
+    }
 }
 
 impl SettingsStore {

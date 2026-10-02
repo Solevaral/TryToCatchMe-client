@@ -11,6 +11,9 @@ use tauri::{AppHandle, Manager};
 use ttcm_core::config::{geo_port, MIXED_LISTEN};
 use ttcm_core::subscription::{self, SubInfo};
 
+/// Больше — не список ссылок (или злонамеренный ответ): не скачиваем дальше.
+const MAX_BODY: usize = 8 * 1024 * 1024;
+
 pub struct Fetched {
     pub body: String,
     pub title: String,
@@ -48,7 +51,8 @@ fn os_name() -> &'static str {
 async fn fetch_once(app: &AppHandle, url: &str, proxy: Option<&str>) -> Result<Fetched, String> {
     let mut builder = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(10))
-        .timeout(Duration::from_secs(30));
+        .timeout(Duration::from_secs(30))
+        .redirect(reqwest::redirect::Policy::limited(5));
     builder = match proxy {
         Some(p) => builder.proxy(reqwest::Proxy::all(p).map_err(|e| e.to_string())?),
         None => builder.no_proxy(),
@@ -76,7 +80,18 @@ async fn fetch_once(app: &AppHandle, url: &str, proxy: Option<&str>) -> Result<F
     };
     let title = subscription::title(header("profile-title").as_deref(), url);
     let info = header("subscription-userinfo").and_then(|h| subscription::parse_userinfo(&h));
-    let body = resp.text().await.map_err(|e| crate::geo::describe_reqwest(&e))?;
+    if resp.content_length().is_some_and(|n| n as usize > MAX_BODY) {
+        return Err(format!("ответ больше {} МБ — это не список серверов", MAX_BODY / 1024 / 1024));
+    }
+    let mut resp = resp;
+    let mut bytes = Vec::new();
+    while let Some(chunk) = resp.chunk().await.map_err(|e| crate::geo::describe_reqwest(&e))? {
+        if bytes.len() + chunk.len() > MAX_BODY {
+            return Err(format!("ответ больше {} МБ — это не список серверов", MAX_BODY / 1024 / 1024));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    let body = String::from_utf8_lossy(&bytes).into_owned();
     Ok(Fetched { body, title, info })
 }
 

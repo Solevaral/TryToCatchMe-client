@@ -255,12 +255,22 @@ impl CoreState {
             ),
         }
 
-        if proxy_outbound.is_some() {
+        if let Some(ob) = &proxy_outbound {
             let pinned: Vec<String> = extra_outbounds
                 .iter()
                 .filter_map(|o| o["tag"].as_str().map(str::to_string))
                 .collect();
-            warm_up(app, pinned);
+            // Hysteria2 работает по UDP (QUIC): его режет провайдер или zapret.
+            let hy2_server = (ob["type"] == "hysteria2").then(|| ob["server"].as_str().unwrap_or("").to_string());
+            if let Some(server) = &hy2_server {
+                if crate::diag::zapret_running() {
+                    app_error(
+                        app,
+                        format!("Запущен zapret (winws.exe): с Game Filter или IPSet «Все адреса» он может ломать UDP-соединение Hysteria2. Если сервер не отвечает — добавьте {server} в исключения IP zapret или выберите сервер VLESS."),
+                    );
+                }
+            }
+            warm_up(app, pinned, hy2_server);
         }
         if !geo_files.is_empty() {
             schedule_geo(app, geo_files, proxy_outbound.is_some().then_some(port), geo_missing);
@@ -388,7 +398,7 @@ impl CoreState {
 /// The first request over some transports (e.g. gRPC + Reality) takes several seconds
 /// while the connection is set up. Open the tunnel right away so the user's first page
 /// doesn't hang, and tell the UI when it's ready (or that it isn't passing traffic).
-fn warm_up(app: &AppHandle, pinned_tags: Vec<String>) {
+fn warm_up(app: &AppHandle, pinned_tags: Vec<String>, hy2_server: Option<String>) {
     // Servers that services are pinned to pay the same first-connection cost.
     for tag in pinned_tags {
         std::thread::spawn(move || {
@@ -413,9 +423,14 @@ fn warm_up(app: &AppHandle, pinned_tags: Vec<String>) {
             std::thread::sleep(Duration::from_millis(500));
         }
         let _ = app.emit("vpn://warm", "fail".to_string());
+        let hint = if hy2_server.is_some() {
+            " Сервер Hysteria2 работает по UDP: провайдер или zapret могут его резать — попробуйте сервер VLESS."
+        } else {
+            ""
+        };
         app_error(
             &app,
-            "Туннель поднят, но трафик через сервер не проходит уже 30 с — проверьте профиль (сервер может не работать) или запустите «Диагностику».".to_string(),
+            format!("Туннель поднят, но трафик через сервер не проходит уже 30 с — проверьте профиль (сервер может не работать) или запустите «Диагностику».{hint}"),
         );
     });
 }

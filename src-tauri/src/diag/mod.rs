@@ -219,6 +219,24 @@ fn run_quiet(cmd: &mut Command) -> bool {
         .unwrap_or(false)
 }
 
+/// Запущен ли zapret (winws.exe): он обрабатывает UDP и может ломать Hysteria2 (QUIC).
+pub fn zapret_running() -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        let out = Command::new("tasklist")
+            .args(["/fi", "imagename eq winws.exe", "/fo", "csv", "/nh"])
+            .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
+            .output();
+        out.map(|o| String::from_utf8_lossy(&o.stdout).to_ascii_lowercase().contains("winws.exe"))
+            .unwrap_or(false)
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
+}
+
 /// Ask the Clash API to time a request through the active proxy outbound.
 pub fn clash_delay(test_url: &str, timeout_ms: u64) -> Option<u64> {
     clash_delay_via("proxy", test_url, timeout_ms)

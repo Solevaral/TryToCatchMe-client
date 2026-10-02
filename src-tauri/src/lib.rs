@@ -115,7 +115,6 @@ pub fn run() {
             commands::routing_set_config,
             commands::service_upsert,
             commands::service_remove,
-            commands::services_reset,
             commands::services_library,
             commands::services_library_refresh,
             commands::geo_refresh,

@@ -173,10 +173,6 @@ export async function serviceRemove(id: string): Promise<void> {
   await invoke("service_remove", { id });
 }
 
-export async function servicesReset(): Promise<void> {
-  await invoke("services_reset");
-}
-
 export async function servicesLibrary(): Promise<Service[]> {
   return await invoke<Service[]>("services_library");
 }

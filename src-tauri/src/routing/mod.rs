@@ -275,10 +275,6 @@ impl RoutingStore {
         let _ = self.save(app);
     }
 
-    pub fn reset_services(&self, app: &AppHandle) {
-        self.with(|p| p.catalog = default_catalog());
-        let _ = self.save(app);
-    }
 
     /// Materialize route rules. `geo` = which downloaded lists exist (missing ones are
     /// left out).

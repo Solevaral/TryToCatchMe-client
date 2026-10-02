@@ -49,5 +49,6 @@
   {"id": "bbc", "name": "BBC", "icon": "📰", "domains": ["bbc.com", "bbc.co.uk", "bbci.co.uk"], "ip_cidrs": []},
   {"id": "meduza", "name": "Meduza", "icon": "🗞️", "domains": ["meduza.io"], "ip_cidrs": []},
   {"id": "dw", "name": "DW", "icon": "📡", "domains": ["dw.com"], "ip_cidrs": []},
-  {"id": "svoboda", "name": "Радио Свобода", "icon": "📻", "domains": ["svoboda.org", "rferl.org", "currenttime.tv"], "ip_cidrs": []}
+  {"id": "svoboda", "name": "Радио Свобода", "icon": "📻", "domains": ["svoboda.org", "rferl.org", "currenttime.tv"], "ip_cidrs": []},
+  {"id": "fandom", "name": "Fandom", "icon": "📖", "domains": ["fandom.com", "wikia.com", "wikia.org", "nocookie.net"], "ip_cidrs": []}
 ]

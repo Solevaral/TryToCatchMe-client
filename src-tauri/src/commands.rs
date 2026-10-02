@@ -153,11 +153,6 @@ pub fn service_remove(app: AppHandle, store: State<'_, RoutingStore>, id: String
     store.remove_service(&app, &id);
 }
 
-#[tauri::command]
-pub fn services_reset(app: AppHandle, store: State<'_, RoutingStore>) {
-    store.reset_services(&app);
-}
-
 /// The large read-only service library the user can add presets from.
 #[tauri::command]
 pub fn services_library(app: AppHandle) -> Vec<Service> {

@@ -4,7 +4,6 @@ import {
   routingSetConfig,
   serviceUpsert,
   serviceRemove,
-  servicesReset,
   servicesLibrary,
   servicesLibraryRefresh,
   coreRestart,
@@ -215,9 +214,6 @@ export default function RoutingPage() {
                 </button>
                 <button className="btn" style={{ padding: "4px 10px" }} onClick={() => setEditing({ id: "", name: "", icon: "🔧", domains: [], ip_cidrs: [] })}>
                   ＋ Свой сервис
-                </button>
-                <button className="btn" style={{ padding: "4px 10px" }} onClick={async () => { await servicesReset(); await reload(); }}>
-                  Сброс
                 </button>
               </div>
             </div>

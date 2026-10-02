@@ -9,7 +9,12 @@ import {
   profilesRemove,
   profilesSetActive,
   profilePing,
+  subscriptionsList,
+  subscriptionUpdate,
+  subscriptionRemove,
   type Profile,
+  type Subscription,
+  type ImportResult,
 } from "../api/backend";
 
 const PROTO_ICON: Record<string, string> = {
@@ -17,22 +22,42 @@ const PROTO_ICON: Record<string, string> = {
   vmess: "🔷",
   shadowsocks: "🧦",
   trojan: "🐴",
+  hysteria2: "⚡",
   wireguard: "🔺",
 };
 
 /** "tcp · reality · vision" — what the profile actually uses, at a glance. */
 function transportLabel(p: Profile): string {
   const ob = p.outbound;
-  const parts = [ob?.transport?.type ?? "tcp"];
+  const parts = [ob?.transport?.type ?? (p.protocol === "hysteria2" ? "quic" : "tcp")];
   if (ob?.tls?.reality?.enabled) parts.push("reality");
   else if (ob?.tls?.enabled) parts.push("tls");
   if (ob?.flow) parts.push(ob.flow.replace("xtls-rprx-", ""));
   return parts.join(" · ");
 }
 
+function formatBytes(n: number): string {
+  const gb = n / 1024 ** 3;
+  return gb >= 1 ? `${gb.toFixed(1)} ГБ` : `${(n / 1024 ** 2).toFixed(0)} МБ`;
+}
+
+/** "Использовано 107.2 ГБ из ∞ · до 30.04.2027 · обновлено 14:05" */
+function subscriptionLabel(s: Subscription, count: number): string {
+  const parts = [`серверов: ${count}`];
+  if (s.info) {
+    const used = formatBytes(s.info.upload + s.info.download);
+    parts.push(`трафик ${used} из ${s.info.total ? formatBytes(s.info.total) : "∞"}`);
+    if (s.info.expire) parts.push(`до ${new Date(s.info.expire * 1000).toLocaleDateString()}`);
+  }
+  if (s.updated_at) parts.push(`обновлено ${new Date(s.updated_at * 1000).toLocaleString()}`);
+  return parts.join(" · ");
+}
+
 export default function ProfilesPage() {
   const { status, toggle, restart, connected, busy } = useConnection();
   const [profiles, setProfiles] = useState<Profile[]>([]);
+  const [subscriptions, setSubscriptions] = useState<Subscription[]>([]);
+  const [updating, setUpdating] = useState<string | null>(null);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [notice, setNotice] = useState<string>("");
   const [pings, setPings] = useState<Record<string, number | null | "...">>({});
@@ -48,10 +73,30 @@ export default function ProfilesPage() {
   }
 
   const refresh = useCallback(async () => {
-    const [list, active] = await Promise.all([profilesList(), profilesActive()]);
+    const [list, active, subs] = await Promise.all([
+      profilesList(),
+      profilesActive(),
+      subscriptionsList(),
+    ]);
     setProfiles(list);
     setActiveId(active);
+    setSubscriptions(subs);
   }, []);
+
+  /** Log and summarize an import / subscription update; reconnect if the active server changed. */
+  async function report(res: ImportResult) {
+    await refresh();
+    const log = useLogStore.getState().add;
+    res.added.forEach((p) => log("app", `Импортирован профиль «${p.name}» (${transportLabel(p)})`));
+    res.errors.forEach((err) => log("warning", `Ссылка не импортирована — ${err}`));
+    const parts: string[] = [];
+    if (res.added.length) parts.push(`Добавлено: ${res.added.length}`);
+    if (res.errors.length)
+      parts.push(`Не импортировано: ${res.errors.length} — первая причина: ${res.errors[0]} (все причины — во вкладке «Логи»)`);
+    setNotice(parts.join(" · ") || "Ничего не найдено");
+    // The active server's settings changed or it left the list — apply right away.
+    if (res.active_changed && connected) await restart();
+  }
 
   useEffect(() => {
     refresh().catch((e) => setNotice(String(e)));
@@ -63,19 +108,29 @@ export default function ProfilesPage() {
       return;
     }
     try {
-      const res = await profilesImport(text);
-      await refresh();
-      const log = useLogStore.getState().add;
-      res.added.forEach((p) => log("app", `Импортирован профиль «${p.name}» (${transportLabel(p)})`));
-      res.errors.forEach((err) => log("warning", `Ссылка не импортирована — ${err}`));
-      const parts: string[] = [];
-      if (res.added.length) parts.push(`Добавлено: ${res.added.length}`);
-      if (res.errors.length)
-        parts.push(`Не импортировано: ${res.errors.length} — первая причина: ${res.errors[0]} (все причины — во вкладке «Логи»)`);
-      setNotice(parts.join(" · ") || "Ничего не найдено");
+      if (/^\s*https?:\/\/\S+\s*$/.test(text)) setNotice("Скачиваю подписку…");
+      await report(await profilesImport(text));
     } catch (e) {
       setNotice(String(e));
     }
+  }
+
+  async function updateSubscription(id: string) {
+    setUpdating(id);
+    setNotice("Обновляю подписку…");
+    try {
+      await report(await subscriptionUpdate(id));
+    } catch (e) {
+      setNotice(String(e));
+    } finally {
+      setUpdating(null);
+    }
+  }
+
+  async function removeSubscription(s: Subscription) {
+    if (!window.confirm(`Удалить подписку «${s.name}» вместе с её серверами?`)) return;
+    await subscriptionRemove(s.id);
+    await refresh();
   }
 
   async function pasteFromClipboard() {
@@ -88,7 +143,9 @@ export default function ProfilesPage() {
   }
 
   async function addManual() {
-    const text = window.prompt("Вставьте ссылку подключения (vless:// vmess:// ss:// trojan://):");
+    const text = window.prompt(
+      "Вставьте ссылку подключения (vless:// vmess:// ss:// trojan:// hysteria2://) или ссылку на подписку (https://…):",
+    );
     if (text) await importText(text);
   }
 
@@ -154,10 +211,44 @@ export default function ProfilesPage() {
         </div>
       )}
 
+      {subscriptions.length > 0 && (
+        <div className="card" style={{ padding: 6, marginBottom: 12 }}>
+          {subscriptions.map((s) => (
+            <div
+              key={s.id}
+              style={{ display: "flex", alignItems: "center", gap: 12, padding: "10px 12px" }}
+            >
+              <span style={{ width: 20, textAlign: "center" }}>🔗</span>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontWeight: 550 }}>{s.name}</div>
+                <div className="muted" style={{ fontSize: 12 }}>
+                  {subscriptionLabel(s, profiles.filter((p) => p.subscription === s.id).length)}
+                </div>
+              </div>
+              <button
+                className="btn"
+                style={{ padding: "4px 10px" }}
+                disabled={updating !== null}
+                onClick={() => updateSubscription(s.id)}
+              >
+                {updating === s.id ? "Обновление…" : "Обновить"}
+              </button>
+              <button
+                className="btn"
+                style={{ padding: "4px 10px" }}
+                onClick={() => removeSubscription(s)}
+              >
+                Удалить
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+
       <div className="card" style={{ padding: profiles.length ? 6 : 18 }}>
         {profiles.length === 0 ? (
           <div className="placeholder">
-            Список профилей пуст. Скопируйте ссылку подключения и нажмите «Вставить из буфера».
+            Список профилей пуст. Скопируйте ссылку подключения или подписки и нажмите «Вставить из буфера».
           </div>
         ) : (
           profiles.map((p) => (
@@ -200,6 +291,9 @@ export default function ProfilesPage() {
               <button
                 className="btn"
                 style={{ padding: "4px 10px" }}
+                // The ping is a TCP connect; Hysteria2 servers listen on UDP only.
+                disabled={p.protocol === "hysteria2"}
+                title={p.protocol === "hysteria2" ? "Hysteria2 работает по UDP — TCP-пинг к нему неприменим" : undefined}
                 onClick={(e) => {
                   e.stopPropagation();
                   pingOne(p.id);

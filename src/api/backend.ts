@@ -85,11 +85,36 @@ export interface Profile {
     flow?: string;
   };
   link?: string | null;
+  /** Id of the subscription the profile came from. */
+  subscription?: string | null;
 }
 
 export interface ImportResult {
   added: Profile[];
   errors: string[];
+  /** The active profile's server changed or vanished — reconnect to apply. */
+  active_changed: boolean;
+}
+
+export interface Subscription {
+  id: string;
+  url: string;
+  name: string;
+  /** Bytes / unix seconds from the panel's subscription-userinfo header. */
+  info?: { upload: number; download: number; total: number; expire?: number | null } | null;
+  updated_at: number;
+}
+
+export async function subscriptionsList(): Promise<Subscription[]> {
+  return await invoke<Subscription[]>("subscriptions_list");
+}
+
+export async function subscriptionUpdate(id: string): Promise<ImportResult> {
+  return await invoke<ImportResult>("subscription_update", { id });
+}
+
+export async function subscriptionRemove(id: string): Promise<void> {
+  await invoke("subscription_remove", { id });
 }
 
 export async function profilesList(): Promise<Profile[]> {

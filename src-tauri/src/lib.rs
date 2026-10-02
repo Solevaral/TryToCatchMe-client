@@ -3,7 +3,7 @@
 //! Modules:
 //!   core     — sing-box sidecar lifecycle
 //!   config   — profiles + rules -> sing-box config.json
-//!   links    — vless/vmess/ss/trojan/subscription parsers
+//!   links    — vless/vmess/ss/trojan/hysteria2/subscription parsers
 //!   clash    — Clash API client for traffic/logs
 //!   routing  — routing model + service presets
 //!   diag     — network chain diagnostics
@@ -22,6 +22,7 @@ pub mod monitor;
 pub mod profiles;
 pub mod routing;
 pub mod settings;
+pub mod subscription;
 pub mod sysproxy;
 pub mod tray;
 
@@ -109,6 +110,9 @@ pub fn run() {
             commands::profiles_list,
             commands::profiles_active,
             commands::profiles_import,
+            commands::subscriptions_list,
+            commands::subscription_update,
+            commands::subscription_remove,
             commands::profiles_remove,
             commands::profiles_set_active,
             commands::routing_get,

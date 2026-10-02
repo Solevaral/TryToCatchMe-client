@@ -1,6 +1,6 @@
 //! Connection-link parsers.
 //!
-//! Parse share links (vless://, vmess://, ss://, trojan://) and subscriptions
+//! Parse share links (vless://, vmess://, ss://, trojan://, hysteria2://) and subscriptions
 //! (base64 blobs / multi-line lists) into a normalized [`Profile`] whose `outbound`
 //! is a ready-to-use sing-box outbound object (the generator sets its `tag`).
 
@@ -23,6 +23,9 @@ pub struct Profile {
     /// The original share link, kept so profiles can be re-parsed after fixes.
     #[serde(default)]
     pub link: Option<String>,
+    /// Id of the subscription this profile came from (replaced on its update).
+    #[serde(default)]
+    pub subscription: Option<String>,
 }
 
 impl Profile {
@@ -35,6 +38,7 @@ impl Profile {
             port,
             outbound,
             link: None,
+            subscription: None,
         }
     }
 }
@@ -96,6 +100,7 @@ fn parse_scheme(raw: &str) -> Result<Profile, String> {
         Some("vmess") => parse_vmess(raw),
         Some("ss") => parse_ss(raw),
         Some("trojan") => parse_trojan(raw),
+        Some("hysteria2") | Some("hy2") => parse_hysteria2(raw),
         Some("wireguard") | Some("wg") => Err(
             "WireGuard share links are not standardized; import via config file (planned)".into(),
         ),
@@ -288,6 +293,56 @@ fn parse_trojan(raw: &str) -> Result<Profile, String> {
     }
     ensure_grpc_alpn(&mut ob, &q);
     Ok(Profile::new(name, "trojan", server, port, ob))
+}
+
+// ---------------------------------------------------------------------------
+// Hysteria2 (QUIC)
+// ---------------------------------------------------------------------------
+fn parse_hysteria2(raw: &str) -> Result<Profile, String> {
+    let url = Url::parse(raw).map_err(|e| format!("bad url: {e}"))?;
+    // Auth is `password@` or `user:password@` (sent to the server as one string).
+    let password = match url.password() {
+        Some(p) => format!("{}:{}", pct(url.username()), pct(p)),
+        None => pct(url.username()),
+    };
+    if password.is_empty() {
+        return Err("missing password".into());
+    }
+    let server = url.host_str().ok_or("missing host")?.to_string();
+    // Hysteria2's default port is 443.
+    let port = url.port().unwrap_or(443);
+    let q = query_map(&url);
+    let name = frag_name(&url, &server);
+
+    let sni = q
+        .get("sni")
+        .filter(|s| !s.is_empty())
+        .cloned()
+        .unwrap_or_else(|| server.clone());
+    let mut tls = json!({ "enabled": true, "server_name": sni });
+    if matches!(q.get("insecure").map(|s| s.as_str()), Some("1") | Some("true")) {
+        tls["insecure"] = json!(true);
+    }
+    if let Some(alpn) = q.get("alpn").filter(|s| !s.is_empty()) {
+        tls["alpn"] = json!(alpn.split(',').map(|s| s.trim()).collect::<Vec<_>>());
+    }
+
+    let mut ob = json!({
+        "type": "hysteria2",
+        "server": server,
+        "server_port": port,
+        "password": password,
+        "tls": tls,
+    });
+    match q.get("obfs").map(|s| s.as_str()) {
+        None | Some("") | Some("none") => {}
+        Some("salamander") => {
+            let pw = q.get("obfs-password").cloned().unwrap_or_default();
+            ob["obfs"] = json!({ "type": "salamander", "password": pw });
+        }
+        Some(other) => return Err(format!("обфускация «{other}» не поддерживается")),
+    }
+    Ok(Profile::new(name, "hysteria2", server, port, ob))
 }
 
 // ---------------------------------------------------------------------------
@@ -490,6 +545,29 @@ mod tests {
     fn link_is_kept_for_reparsing() {
         let link = "trojan://pass@host.net:443?sni=host.net#t";
         assert_eq!(parse_link(link).unwrap().link.as_deref(), Some(link));
+    }
+
+    #[test]
+    fn parse_hysteria2_salamander() {
+        let link = "hysteria2://secret@1.2.3.4:8444/?sni=hy.example.com&obfs=salamander&obfs-password=ob&insecure=1#%F0%9F%87%A9%F0%9F%87%AA%20DE";
+        let p = parse_link(link).unwrap();
+        assert_eq!(p.protocol, "hysteria2");
+        assert_eq!(p.port, 8444);
+        assert_eq!(p.name, "🇩🇪 DE");
+        assert_eq!(p.outbound["password"], "secret");
+        assert_eq!(p.outbound["tls"]["server_name"], "hy.example.com");
+        assert_eq!(p.outbound["tls"]["insecure"], true);
+        assert_eq!(p.outbound["obfs"]["type"], "salamander");
+        assert_eq!(p.outbound["obfs"]["password"], "ob");
+    }
+
+    #[test]
+    fn parse_hy2_alias_user_pass_default_port() {
+        let p = parse_link("hy2://user:pw@h.net?sni=s.net#x").unwrap();
+        assert_eq!(p.protocol, "hysteria2");
+        assert_eq!(p.port, 443);
+        assert_eq!(p.outbound["password"], "user:pw");
+        assert!(p.outbound.get("obfs").is_none());
     }
 
     #[test]

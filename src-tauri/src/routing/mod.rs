@@ -12,7 +12,7 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager};
 
-use ttcm_core::routing::{build_route, geo_files, service_geo_file, GeoFile, GeoInput, RouteSpec, RoutingConfig, Service};
+use ttcm_core::routing::{antifilter_files, build_route, geo_files, service_geo_file, GeoFile, GeoInput, RouteSpec, RoutingConfig, Service};
 
 const DEFAULT_PRESETS: &str = include_str!("../../resources/service-presets.json");
 const SERVICE_LIBRARY: &str = include_str!("../../resources/service-library.json");
@@ -146,6 +146,7 @@ fn migrate(p: &mut Persisted) -> bool {
     }
     let ids: Vec<String> = p.catalog.iter().map(|s| s.id.clone()).collect();
     p.config.services.retain(|s| ids.contains(&s.id));
+    p.config.antifilter_services.retain(|s| ids.contains(&s.id));
     p.presets_version = PRESETS_VERSION;
     true
 }
@@ -158,6 +159,8 @@ pub struct RoutePlan {
     pub service_geosites: Vec<String>,
     /// Profile ids that services are pinned to.
     pub pinned_profiles: Vec<String>,
+    /// Antifilter mode with the lists on.
+    pub antifilter: bool,
 }
 
 impl RoutePlan {
@@ -169,6 +172,9 @@ impl RoutePlan {
     pub fn files(&self) -> Vec<GeoFile> {
         let mut files = self.region_files();
         files.extend(self.service_geosites.iter().map(|n| service_geo_file(n)));
+        if self.antifilter {
+            files.extend(antifilter_files());
+        }
         files
     }
 }
@@ -271,6 +277,7 @@ impl RoutingStore {
         self.with(|p| {
             p.catalog.retain(|s| s.id != id);
             p.config.services.retain(|s| s.id != id);
+            p.config.antifilter_services.retain(|s| s.id != id);
         });
         let _ = self.save(app);
     }
@@ -286,14 +293,18 @@ impl RoutingStore {
     /// and profiles that some services are pinned to (rule mode only).
     pub fn plan(&self) -> RoutePlan {
         self.with(|p| {
-            if p.config.mode != "rule" {
-                return RoutePlan::default();
-            }
-            let mut plan = RoutePlan {
-                region: p.config.region.clone().filter(|r| !r.is_empty()),
-                ..Default::default()
+            let (selections, mut plan) = match p.config.mode.as_str() {
+                "rule" => (
+                    &p.config.services,
+                    RoutePlan { region: p.config.region.clone().filter(|r| !r.is_empty()), ..Default::default() },
+                ),
+                "antifilter" => (
+                    &p.config.antifilter_services,
+                    RoutePlan { antifilter: p.config.antifilter, ..Default::default() },
+                ),
+                _ => return RoutePlan::default(),
             };
-            for sel in &p.config.services {
+            for sel in selections {
                 let Some(svc) = p.catalog.iter().find(|s| s.id == sel.id) else { continue };
                 if let Some(g) = &svc.geosite {
                     if sel.action != "direct" && !plan.service_geosites.contains(g) {

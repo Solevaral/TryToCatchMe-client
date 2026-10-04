@@ -120,6 +120,7 @@ pub fn run() {
             commands::service_upsert,
             commands::service_remove,
             commands::services_library,
+            commands::open_url,
             commands::services_library_refresh,
             commands::geo_refresh,
             commands::sysproxy_status,

@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use tauri::{AppHandle, Manager};
 use ttcm_core::config::{geo_port, MIXED_LISTEN};
-use ttcm_core::routing::GeoFile;
+use ttcm_core::routing::{list_to_rule_set, GeoFile, GeoKind};
 
 /// sing-box binary rule-set magic: "SRS" + format version.
 const SRS_MAGIC: &[u8] = b"SRS";
@@ -57,6 +57,20 @@ pub fn remove(app: &AppHandle, files: &[GeoFile]) {
     }
 }
 
+/// Download a list file; text lists (antifilter) are converted to a JSON rule-set.
+async fn fetch_file(file: &GeoFile, proxy: Option<&str>) -> Result<Vec<u8>, String> {
+    let body = fetch(&file.url, proxy).await?;
+    match file.kind {
+        GeoKind::Srs => {
+            if !body.starts_with(SRS_MAGIC) {
+                return Err("получен не файл списка (возможно, страница блокировки провайдера)".into());
+            }
+            Ok(body)
+        }
+        kind => list_to_rule_set(kind, &String::from_utf8_lossy(&body)).map(String::into_bytes),
+    }
+}
+
 async fn fetch(url: &str, proxy: Option<&str>) -> Result<Vec<u8>, String> {
     let mut builder = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(10))
@@ -72,9 +86,6 @@ async fn fetch(url: &str, proxy: Option<&str>) -> Result<Vec<u8>, String> {
         return Err(format!("сервер ответил {status}"));
     }
     let body = resp.bytes().await.map_err(|e| describe_reqwest(&e))?;
-    if !body.starts_with(SRS_MAGIC) {
-        return Err("получен не файл списка (возможно, страница блокировки провайдера)".into());
-    }
     Ok(body.to_vec())
 }
 
@@ -124,7 +135,7 @@ async fn download_inner(app: &AppHandle, files: &[GeoFile], vpn_port: Option<u16
     'attempt: for (label, proxy) in attempts {
         let mut fetched = Vec::new();
         for f in files {
-            match fetch(&f.url, proxy.as_deref()).await {
+            match fetch_file(f, proxy.as_deref()).await {
                 Ok(bytes) => fetched.push((f, bytes)),
                 Err(e) => {
                     errors.push(format!("{label}: {} — {e}", f.file_name));

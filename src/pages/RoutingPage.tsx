@@ -6,6 +6,7 @@ import {
   serviceRemove,
   servicesLibrary,
   servicesLibraryRefresh,
+  openUrl,
   coreRestart,
   geoRefresh,
   settingsGet,
@@ -97,27 +98,57 @@ export default function RoutingPage() {
   if (!config) return <div className="placeholder">Загрузка…</div>;
 
   const setMode = (mode: string) => persist({ ...config, mode });
-  const serviceEnabled = (id: string) => config.services.some((s) => s.id === id);
+  // У Rule и Antifilter свой выбор сервисов: каталог общий, галочки — у каждого режима свои.
+  const selKey = config.mode === "antifilter" ? "antifilter_services" : "services";
+  const selected = config[selKey];
+  const setSelected = (list: typeof selected) => persist({ ...config!, [selKey]: list });
+  const serviceEnabled = (id: string) => selected.some((s) => s.id === id);
   const serviceAction = (id: string): RuleAction =>
-    config.services.find((s) => s.id === id)?.action ?? "proxy";
+    selected.find((s) => s.id === id)?.action ?? "proxy";
 
   function toggleService(id: string) {
     const exists = serviceEnabled(id);
-    const services = exists
-      ? config!.services.filter((s) => s.id !== id)
-      : [...config!.services, { id, action: "proxy" as RuleAction }];
-    persist({ ...config!, services });
+    setSelected(exists ? selected.filter((s) => s.id !== id) : [...selected, { id, action: "proxy" as RuleAction }]);
   }
   const serviceProfile = (id: string): string =>
-    config.services.find((s) => s.id === id)?.profile ?? "";
+    selected.find((s) => s.id === id)?.profile ?? "";
   function setServiceProfile(id: string, profile: string) {
-    const services = config!.services.map((s) => (s.id === id ? { ...s, profile: profile || null } : s));
-    persist({ ...config!, services });
+    setSelected(selected.map((s) => (s.id === id ? { ...s, profile: profile || null } : s)));
   }
   function setServiceAction(id: string, action: RuleAction) {
-    const services = config!.services.map((s) => (s.id === id ? { ...s, action } : s));
-    persist({ ...config!, services });
+    setSelected(selected.map((s) => (s.id === id ? { ...s, action } : s)));
   }
+
+  async function refreshLists() {
+    setGeoState("...");
+    setGeoResult(null);
+    try {
+      setGeoResult(await geoRefresh());
+    } catch (e) {
+      setGeoResult({ ok: false, message: String(e) });
+    }
+    setGeoState("");
+  }
+
+  const refreshButton = (disabled: boolean, title: string) => (
+    <button className="btn" style={{ padding: "4px 10px" }} disabled={disabled || geoState === "..."} onClick={refreshLists} title={title}>
+      {geoState === "..." ? "Скачиваю…" : "↻ Обновить списки"}
+    </button>
+  );
+
+  const refreshResult = geoResult && (
+    <div
+      style={{
+        fontSize: 12,
+        marginBottom: 10,
+        color: geoResult.ok ? "var(--ok)" : "var(--err)",
+        wordBreak: "break-word",
+      }}
+    >
+      {geoResult.ok ? "✓ " : "✕ "}
+      {geoResult.message}
+    </div>
+  );
 
   async function saveService(svc: Service) {
     await serviceUpsert(svc);
@@ -158,11 +189,12 @@ export default function RoutingPage() {
 
       <div className="card" style={{ marginBottom: 16 }}>
         <div style={{ fontWeight: 600, marginBottom: 10 }}>Режим</div>
-        <div style={{ display: "flex", gap: 10 }}>
+        <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
           {[
             { v: "global", l: "Global — всё через VPN" },
             { v: "direct", l: "Direct — всё напрямую" },
             { v: "rule", l: "Rule — по правилам" },
+            { v: "antifilter", l: "Antifilter — заблокированное через VPN" },
           ].map((m) => (
             <button
               key={m.v}
@@ -202,7 +234,36 @@ export default function RoutingPage() {
         </div>
       </div>
 
-      {config.mode === "rule" && (
+      {config.mode === "antifilter" && (
+        <div className="card" style={{ marginBottom: 16 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+            <div style={{ fontWeight: 600 }}>Antifilter</div>
+            {refreshButton(!config.antifilter, "Скачать свежие списки antifilter (через VPN, при неудаче — напрямую). Старые списки остаются, если скачать не удалось.")}
+          </div>
+          {refreshResult}
+          <label style={{ display: "flex", gap: 10, alignItems: "flex-start" }}>
+            <input
+              type="checkbox"
+              checked={config.antifilter}
+              onChange={(e) => persist({ ...config, antifilter: e.target.checked })}
+            />
+            <span>
+              Заблокированное в России — через VPN
+              <div className="muted" style={{ fontSize: 12 }}>
+                Списки сервиса{" "}
+                <ExtLink url="https://antifilter.download/">antifilter.download</ExtLink>:
+                заблокированные домены, отобранные сообществом (
+                <ExtLink url="https://community.antifilter.download/">community.antifilter.download</ExtLink>
+                ), и заблокированные IP-подсети (allyouneed). Списки скачиваются через VPN, хранятся
+                у вас и обновляются раз в сутки. Сервисы, которые сами закрыты для России
+                (Duolingo, Fandom), и замедленный YouTube в списках нет — их можно включить ниже.
+              </div>
+            </span>
+          </label>
+        </div>
+      )}
+
+      {(config.mode === "rule" || config.mode === "antifilter") && (
         <>
           {/* Services */}
           <div className="card" style={{ marginBottom: 16 }}>
@@ -277,42 +338,14 @@ export default function RoutingPage() {
             </div>
           </div>
 
-          {/* Region / geo */}
+          {/* Region / geo — Rule only */}
+          {config.mode === "rule" && (
           <div className="card" style={{ marginBottom: 16 }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
               <div style={{ fontWeight: 600 }}>Российские сайты</div>
-              <button
-                className="btn"
-                style={{ padding: "4px 10px" }}
-                disabled={!config.region || geoState === "..."}
-                onClick={async () => {
-                  setGeoState("...");
-                  setGeoResult(null);
-                  try {
-                    setGeoResult(await geoRefresh());
-                  } catch (e) {
-                    setGeoResult({ ok: false, message: String(e) });
-                  }
-                  setGeoState("");
-                }}
-                title="Скачать свежие списки geosite/geoip (через VPN, при неудаче — напрямую). Старые списки остаются, если скачать не удалось."
-              >
-                {geoState === "..." ? "Скачиваю…" : "↻ Обновить списки"}
-              </button>
+              {refreshButton(!config.region, "Скачать свежие списки geosite/geoip (через VPN, при неудаче — напрямую). Старые списки остаются, если скачать не удалось.")}
             </div>
-            {geoResult && (
-              <div
-                style={{
-                  fontSize: 12,
-                  marginBottom: 10,
-                  color: geoResult.ok ? "var(--ok)" : "var(--err)",
-                  wordBreak: "break-word",
-                }}
-              >
-                {geoResult.ok ? "✓ " : "✕ "}
-                {geoResult.message}
-              </div>
-            )}
+            {refreshResult}
             <label style={{ display: "flex", gap: 10, alignItems: "flex-start" }}>
               <input
                 type="checkbox"
@@ -331,12 +364,23 @@ export default function RoutingPage() {
               </span>
             </label>
           </div>
+          )}
 
           {/* Unmatched */}
           <div className="card">
             <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
               <span style={{ fontWeight: 600 }}>Остальной трафик:</span>
-              <select value={config.final_action} onChange={(e) => persist({ ...config, final_action: e.target.value as RuleAction })} style={selStyle}>
+              <select
+                value={config.mode === "antifilter" ? config.antifilter_final : config.final_action}
+                onChange={(e) =>
+                  persist(
+                    config.mode === "antifilter"
+                      ? { ...config, antifilter_final: e.target.value as RuleAction }
+                      : { ...config, final_action: e.target.value as RuleAction },
+                  )
+                }
+                style={selStyle}
+              >
                 {ACTIONS.filter((a) => a !== "block").map((a) => (
                   <option key={a} value={a}>{ACTION_LABEL[a]}</option>
                 ))}
@@ -364,6 +408,22 @@ export default function RoutingPage() {
         />
       )}
     </div>
+  );
+}
+
+/** Ссылка, которая открывается в браузере пользователя, а не внутри окна приложения. */
+function ExtLink({ url, children }: { url: string; children: React.ReactNode }) {
+  return (
+    <a
+      href={url}
+      onClick={(e) => {
+        e.preventDefault();
+        openUrl(url).catch(console.error);
+      }}
+      style={{ color: "var(--accent)", cursor: "pointer" }}
+    >
+      {children}
+    </a>
   );
 }
 

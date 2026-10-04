@@ -22,7 +22,7 @@ use crate::config::{self, geo_port, GenOptions, CLASH_CONTROLLER, MIXED_LISTEN};
 use crate::sysproxy::SysProxyState;
 use crate::profiles::ProfileStore;
 use crate::routing::RoutingStore;
-use ttcm_core::routing::{profile_tag, service_geo_file, GeoFile, GeoInput};
+use ttcm_core::routing::{antifilter_files, profile_tag, service_geo_file, GeoFile, GeoInput};
 
 #[derive(Default)]
 pub struct CoreState {
@@ -122,7 +122,8 @@ impl CoreState {
                 );
             }
         }
-        let geo_input = GeoInput { dir: &geo_dir, region_ready, geosites: &service_ready };
+        let antifilter_ready = plan.antifilter && crate::geo::all_present(app, &antifilter_files());
+        let geo_input = GeoInput { dir: &geo_dir, region_ready, geosites: &service_ready, antifilter_ready };
         let spec = routing.route_spec(Some(&geo_input));
 
         // Services pinned to other profiles get their own outbounds.

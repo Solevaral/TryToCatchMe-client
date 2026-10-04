@@ -170,12 +170,18 @@ export interface Service {
 }
 
 export interface RoutingConfig {
-  mode: string; // global | direct | rule
+  mode: string; // global | direct | rule | antifilter
   rules: RoutingRule[];
   services: ServiceSel[];
   region: string | null;
   geo_action: RuleAction;
   final_action: RuleAction;
+  /** Antifilter mode: the antifilter.download lists go through the VPN. */
+  antifilter: boolean;
+  /** Antifilter mode: its own service selection. */
+  antifilter_services: ServiceSel[];
+  /** Antifilter mode: traffic outside the lists and services. */
+  antifilter_final: RuleAction;
 }
 
 export interface RoutingSnapshot {
@@ -197,6 +203,11 @@ export async function serviceUpsert(service: Service): Promise<void> {
 
 export async function serviceRemove(id: string): Promise<void> {
   await invoke("service_remove", { id });
+}
+
+/** Открыть https-ссылку в браузере пользователя (не от имени администратора). */
+export async function openUrl(url: string): Promise<void> {
+  await invoke("open_url", { url });
 }
 
 export async function servicesLibrary(): Promise<Service[]> {

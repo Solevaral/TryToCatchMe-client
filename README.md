@@ -26,7 +26,7 @@ installer and a Linux AppImage.
   passing traffic.
 
 ### Routing
-- **Global / Direct / Rule** modes.
+- **Global / Direct / Rule / Antifilter** modes. Antifilter (the default for a new install) sends what is blocked in Russia through the VPN — the community domain list and the blocked IP subnets from [antifilter.download](https://antifilter.download/), downloaded and refreshed daily by the app — and everything else directly; services can be added on top.
 - **Services** — an additive, editable catalog (Google + Gemini, YouTube, Cloudflare,
   Telegram, Discord, Steam, Netflix, …) plus a searchable library of 30 more
   (ChatGPT, Claude, X, Instagram, Spotify, GitHub, …). Each service is

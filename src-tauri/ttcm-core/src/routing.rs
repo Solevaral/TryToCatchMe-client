@@ -60,6 +60,12 @@ fn default_mode() -> String {
 fn default_final() -> String {
     "proxy".to_string()
 }
+fn default_true() -> bool {
+    true
+}
+fn default_antifilter_final() -> String {
+    "direct".to_string()
+}
 fn default_geo_action() -> String {
     // RU region means "route Russian sites directly" (keep local traffic off the VPN).
     "direct".to_string()
@@ -81,17 +87,32 @@ pub struct RoutingConfig {
     /// Action for traffic that matches no rule (rule mode only).
     #[serde(default = "default_final")]
     pub final_action: String,
+    /// Antifilter mode: the antifilter.download lists go through the VPN.
+    #[serde(default = "default_true")]
+    pub antifilter: bool,
+    /// Antifilter mode: its own service selection (empty by default).
+    #[serde(default)]
+    pub antifilter_services: Vec<ServiceSel>,
+    /// Antifilter mode: action for traffic outside the lists and services.
+    #[serde(default = "default_antifilter_final")]
+    pub antifilter_final: String,
 }
 
 impl Default for RoutingConfig {
     fn default() -> Self {
+        // A fresh install: Antifilter mode (blocked lists through the VPN, the rest
+        // directly), and «direct» for unmatched traffic in Rule mode too. Configs saved
+        // by older versions keep their values (serde defaults above are unchanged).
         RoutingConfig {
-            mode: default_mode(),
+            mode: "antifilter".to_string(),
             rules: Vec::new(),
             services: Vec::new(),
             region: None,
             geo_action: default_geo_action(),
-            final_action: default_final(),
+            final_action: "direct".to_string(),
+            antifilter: true,
+            antifilter_services: Vec::new(),
+            antifilter_final: default_antifilter_final(),
         }
     }
 }
@@ -108,12 +129,83 @@ const GEOSITE_BASE: &str =
     "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set";
 const GEOIP_BASE: &str = "https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set";
 
+/// What a downloaded list file is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GeoKind {
+    /// Compiled sing-box rule-set (.srs), used as is.
+    Srs,
+    /// Plain text, one domain per line → JSON rule-set with `domain_suffix`.
+    DomainList,
+    /// Plain text, one IP or CIDR per line → JSON rule-set with `ip_cidr`.
+    IpList,
+}
+
 /// A geo rule-set file the app downloads for a region.
 #[derive(Clone, Debug)]
 pub struct GeoFile {
     pub tag: String,
     pub file_name: String,
     pub url: String,
+    pub kind: GeoKind,
+}
+
+impl GeoFile {
+    /// sing-box `format` of the stored file.
+    pub fn format(&self) -> &'static str {
+        if self.kind == GeoKind::Srs { "binary" } else { "source" }
+    }
+}
+
+/// antifilter.download lists: the community-curated blocked domains and the
+/// summarized blocked IP subnets (ipsum + subnet).
+pub const ANTIFILTER_DOMAINS_URL: &str = "https://community.antifilter.download/list/domains.lst";
+pub const ANTIFILTER_IP_URL: &str = "https://antifilter.download/list/allyouneed.lst";
+
+pub fn antifilter_files() -> [GeoFile; 2] {
+    [
+        GeoFile {
+            tag: "antifilter-domains".into(),
+            file_name: "antifilter-domains.json".into(),
+            url: ANTIFILTER_DOMAINS_URL.into(),
+            kind: GeoKind::DomainList,
+        },
+        GeoFile {
+            tag: "antifilter-ip".into(),
+            file_name: "antifilter-ip.json".into(),
+            url: ANTIFILTER_IP_URL.into(),
+            kind: GeoKind::IpList,
+        },
+    ]
+}
+
+/// Turn a plain-text list into a sing-box source rule-set (JSON). Garbage lines are
+/// skipped; a list that is too short is rejected (a block page or a cut-off download).
+pub fn list_to_rule_set(kind: GeoKind, text: &str) -> Result<String, String> {
+    let lines = text.lines().map(|l| l.trim().trim_matches('"')).filter(|l| !l.is_empty() && !l.starts_with('#'));
+    let (key, values, min): (&str, Vec<String>, usize) = match kind {
+        GeoKind::DomainList => (
+            "domain_suffix",
+            lines
+                .map(|l| l.trim_start_matches("*.").trim_start_matches('.').to_ascii_lowercase())
+                .filter(|d| d.contains('.') && d.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-'))
+                .collect(),
+            50,
+        ),
+        GeoKind::IpList => (
+            "ip_cidr",
+            lines
+                .filter(|l| l.chars().all(|c| c.is_ascii_hexdigit() || c == '.' || c == ':' || c == '/'))
+                .filter(|l| l.split('/').next().is_some_and(|ip| ip.parse::<std::net::IpAddr>().is_ok()))
+                .map(str::to_string)
+                .collect(),
+            100,
+        ),
+        GeoKind::Srs => return Err("не текстовый список".into()),
+    };
+    if values.len() < min {
+        return Err(format!("в списке только {} записей — это не список блокировок", values.len()));
+    }
+    Ok(json!({ "version": 2, "rules": [{ key: values }] }).to_string())
 }
 
 /// The downloaded geo lists that are available to the core.
@@ -124,6 +216,8 @@ pub struct GeoInput<'a> {
     pub region_ready: bool,
     /// Service geosite names whose files are present (e.g. "google-gemini").
     pub geosites: &'a [String],
+    /// antifilter lists are present.
+    pub antifilter_ready: bool,
 }
 
 /// File for a service-backing geosite list.
@@ -133,6 +227,7 @@ pub fn service_geo_file(name: &str) -> GeoFile {
         tag: format!("svc-geosite-{name}"),
         url: format!("{GEOSITE_BASE}/{file}"),
         file_name: file,
+        kind: GeoKind::Srs,
     }
 }
 
@@ -146,11 +241,13 @@ pub fn geo_files(region: &str) -> [GeoFile; 2] {
             tag: format!("geosite-{region}"),
             url: format!("{GEOSITE_BASE}/{site}"),
             file_name: site,
+            kind: GeoKind::Srs,
         },
         GeoFile {
             tag: format!("geoip-{region}"),
             url: format!("{GEOIP_BASE}/{ip}"),
             file_name: ip,
+            kind: GeoKind::Srs,
         },
     ]
 }
@@ -169,7 +266,37 @@ pub fn build_route(cfg: &RoutingConfig, catalog: &[Service], geo: Option<&GeoInp
             rule_sets: vec![],
             final_action: "direct".to_string(),
         },
+        "antifilter" => build_antifilter_mode(cfg, catalog, geo),
         _ => build_rule_mode(cfg, catalog, geo),
+    }
+}
+
+/// Antifilter mode: LAN direct, then this mode's own services (explicit choices win),
+/// then everything on the antifilter.download lists through the VPN, the rest per
+/// `antifilter_final`. Region and user rules are Rule-mode only.
+fn build_antifilter_mode(cfg: &RoutingConfig, catalog: &[Service], geo: Option<&GeoInput>) -> RouteSpec {
+    let mut rules: Vec<Value> = vec![json!({ "ip_is_private": true, "outbound": "direct" })];
+    let mut rule_sets: Vec<Value> = Vec::new();
+    push_service_rules(&cfg.antifilter_services, catalog, geo, &mut rules, &mut rule_sets);
+
+    if let Some(g) = geo.filter(|g| cfg.antifilter && g.antifilter_ready) {
+        let mut tags = Vec::new();
+        for f in antifilter_files() {
+            rule_sets.push(json!({
+                "type": "local",
+                "tag": f.tag,
+                "format": f.format(),
+                "path": format!("{}/{}", g.dir.trim_end_matches(['/', '\\']), f.file_name)
+            }));
+            tags.push(f.tag);
+        }
+        rules.push(json!({ "rule_set": tags, "outbound": "proxy" }));
+    }
+
+    RouteSpec {
+        rules,
+        rule_sets,
+        final_action: sanitize_action(&cfg.antifilter_final),
     }
 }
 
@@ -222,12 +349,56 @@ fn build_rule_mode(cfg: &RoutingConfig, catalog: &[Service], geo: Option<&GeoInp
     // LAN / private IPs always direct.
     rules.push(json!({ "ip_is_private": true, "outbound": "direct" }));
 
-    // Services (additive): one rule per enabled service (+ one for its geosite list).
-    // sing-box takes the FIRST matching rule, so narrower services go first:
-    // Gemini (gemini.google.com) must win over Google (google.com) regardless of the
-    // order the user added them in. See `service_ranks`.
-    let enabled: Vec<(&ServiceSel, &Service)> = cfg
-        .services
+    push_service_rules(&cfg.services, catalog, geo, &mut rules, &mut rule_sets);
+
+    // User rules grouped by (kind, action).
+    for (key, values) in group_rules(&cfg.rules) {
+        let (kind, action) = key;
+        rules.push(json!({ &kind: values, "outbound": action }));
+    }
+
+    // Geo rule-sets by region, as LOCAL files the app downloads itself (see
+    // `geo_files`). The core never fetches them, so a blocked/failed download can't
+    // abort startup; without the files the geo rule is simply omitted.
+    let region_geo = geo.filter(|g| g.region_ready);
+    if let (Some(region), Some(g)) = (cfg.region.as_ref().filter(|r| !r.is_empty()), region_geo) {
+        let dir = g.dir;
+        let files = geo_files(region);
+        let mut tags = Vec::new();
+        for f in &files {
+            rule_sets.push(json!({
+                "type": "local",
+                "tag": f.tag,
+                "format": "binary",
+                "path": format!("{}/{}", dir.trim_end_matches(['/', '\\']), f.file_name)
+            }));
+            tags.push(f.tag.clone());
+        }
+        rules.push(json!({
+            "rule_set": tags,
+            "outbound": sanitize_action(&cfg.geo_action)
+        }));
+    }
+
+    RouteSpec {
+        rules,
+        rule_sets,
+        final_action: sanitize_action(&cfg.final_action),
+    }
+}
+
+/// Services (additive): one rule per enabled service (+ one for its geosite list).
+/// sing-box takes the FIRST matching rule, so narrower services go first:
+/// Gemini (gemini.google.com) must win over Google (google.com) regardless of the
+/// order the user added them in. See `service_ranks`.
+fn push_service_rules(
+    selections: &[ServiceSel],
+    catalog: &[Service],
+    geo: Option<&GeoInput>,
+    rules: &mut Vec<Value>,
+    rule_sets: &mut Vec<Value>,
+) {
+    let enabled: Vec<(&ServiceSel, &Service)> = selections
         .iter()
         .filter_map(|sel| catalog.iter().find(|s| s.id == sel.id).map(|svc| (sel, svc)))
         .collect();
@@ -271,41 +442,6 @@ fn build_rule_mode(cfg: &RoutingConfig, catalog: &[Service], geo: Option<&GeoInp
     for r in 0..=max_rank {
         rules.extend(domain_rules.iter().filter(|(k, _)| *k == r).map(|(_, v)| v.clone()));
         rules.extend(list_rules.iter().filter(|(k, _)| *k == r).map(|(_, v)| v.clone()));
-    }
-
-    // User rules grouped by (kind, action).
-    for (key, values) in group_rules(&cfg.rules) {
-        let (kind, action) = key;
-        rules.push(json!({ &kind: values, "outbound": action }));
-    }
-
-    // Geo rule-sets by region, as LOCAL files the app downloads itself (see
-    // `geo_files`). The core never fetches them, so a blocked/failed download can't
-    // abort startup; without the files the geo rule is simply omitted.
-    let region_geo = geo.filter(|g| g.region_ready);
-    if let (Some(region), Some(g)) = (cfg.region.as_ref().filter(|r| !r.is_empty()), region_geo) {
-        let dir = g.dir;
-        let files = geo_files(region);
-        let mut tags = Vec::new();
-        for f in &files {
-            rule_sets.push(json!({
-                "type": "local",
-                "tag": f.tag,
-                "format": "binary",
-                "path": format!("{}/{}", dir.trim_end_matches(['/', '\\']), f.file_name)
-            }));
-            tags.push(f.tag.clone());
-        }
-        rules.push(json!({
-            "rule_set": tags,
-            "outbound": sanitize_action(&cfg.geo_action)
-        }));
-    }
-
-    RouteSpec {
-        rules,
-        rule_sets,
-        final_action: sanitize_action(&cfg.final_action),
     }
 }
 
@@ -383,9 +519,10 @@ mod tests {
             ],
             services: vec![ServiceSel { id: "cloudflare".into(), action: "proxy".into(), profile: None }],
             region: Some("ru".into()),
+            final_action: "proxy".into(),
             ..Default::default()
         };
-        let geo = GeoInput { dir: "C:/data/rules", region_ready: true, geosites: &[] };
+        let geo = GeoInput { dir: "C:/data/rules", region_ready: true, geosites: &[], antifilter_ready: false };
         let spec = build_route(&cfg, &catalog(), Some(&geo));
         // private-ip + service + grouped user rule + geo = 4 rules
         assert_eq!(spec.rules.len(), 4);
@@ -419,7 +556,7 @@ mod tests {
             ..Default::default()
         };
         let names = vec!["google-gemini".to_string()];
-        let geo = GeoInput { dir: "D:/r", region_ready: false, geosites: &names };
+        let geo = GeoInput { dir: "D:/r", region_ready: false, geosites: &names, antifilter_ready: false };
         let spec = build_route(&cfg, &catalog, Some(&geo));
         // private + domain rule + geosite rule, both pinned to the chosen profile
         assert_eq!(spec.rules.len(), 3);
@@ -461,7 +598,7 @@ mod tests {
             ..Default::default()
         };
         let names = vec!["google".to_string(), "google-gemini".to_string()];
-        let geo = GeoInput { dir: "D:/r", region_ready: false, geosites: &names };
+        let geo = GeoInput { dir: "D:/r", region_ready: false, geosites: &names, antifilter_ready: false };
         let spec = build_route(&cfg, &catalog, Some(&geo));
         let pos = |f: &dyn Fn(&Value) -> bool| spec.rules.iter().position(|r| f(r)).unwrap();
         let google_domains = pos(&|r| r["domain_suffix"][0] == "google.com");
@@ -476,5 +613,59 @@ mod tests {
         assert_eq!(spec.rules[google_domains]["outbound"], "via-grpc");
         // Unrelated services keep the user's order.
         assert!(youtube < pos(&|r| r["domain_suffix"][0] == "cloudflare.com"));
+    }
+
+    #[test]
+    fn antifilter_mode_lists_services_and_final() {
+        let cfg = RoutingConfig {
+            mode: "antifilter".into(),
+            antifilter_services: vec![ServiceSel { id: "cloudflare".into(), action: "proxy".into(), profile: None }],
+            ..Default::default()
+        };
+        let geo = GeoInput { dir: "D:/r", region_ready: false, geosites: &[], antifilter_ready: true };
+        let spec = build_route(&cfg, &catalog(), Some(&geo));
+        // private + service + antifilter lists
+        assert_eq!(spec.rules.len(), 3);
+        assert_eq!(spec.rules[2]["rule_set"], json!(["antifilter-domains", "antifilter-ip"]));
+        assert_eq!(spec.rules[2]["outbound"], "proxy");
+        assert_eq!(spec.rule_sets[0]["format"], "source");
+        assert_eq!(spec.rule_sets[0]["path"], "D:/r/antifilter-domains.json");
+        assert_eq!(spec.final_action, "direct");
+
+        // Lists not downloaded yet / turned off — the rule is left out.
+        assert_eq!(build_route(&cfg, &catalog(), None).rules.len(), 2);
+        let off = RoutingConfig { antifilter: false, ..cfg.clone() };
+        assert_eq!(build_route(&off, &catalog(), Some(&geo)).rules.len(), 2);
+    }
+
+    #[test]
+    fn fresh_install_defaults() {
+        let d = RoutingConfig::default();
+        assert_eq!(d.mode, "antifilter");
+        assert!(d.antifilter);
+        assert_eq!(d.final_action, "direct");
+        assert_eq!(d.antifilter_final, "direct");
+        // An old saved config without the new fields keeps its mode and gets the list on.
+        let old: RoutingConfig = serde_json::from_str(r#"{"mode":"rule","final_action":"proxy"}"#).unwrap();
+        assert_eq!(old.mode, "rule");
+        assert_eq!(old.final_action, "proxy");
+        assert!(old.antifilter);
+        assert_eq!(old.antifilter_final, "direct");
+    }
+
+    #[test]
+    fn plain_lists_become_rule_sets() {
+        let domains = (0..60).map(|i| format!("site{i}.com")).collect::<Vec<_>>().join("\n") + "\n\"quoted.ru\nbad line\n*.wild.org";
+        let json: Value = serde_json::from_str(&list_to_rule_set(GeoKind::DomainList, &domains).unwrap()).unwrap();
+        let list = json["rules"][0]["domain_suffix"].as_array().unwrap();
+        assert!(list.contains(&json!("quoted.ru")));
+        assert!(list.contains(&json!("wild.org")));
+        assert!(!list.iter().any(|d| d.as_str().unwrap().contains(' ')));
+
+        let ips = (0..150).map(|i| format!("10.{i}.0.0/16")).collect::<Vec<_>>().join("\n") + "\n<html>";
+        let json: Value = serde_json::from_str(&list_to_rule_set(GeoKind::IpList, &ips).unwrap()).unwrap();
+        assert_eq!(json["rules"][0]["ip_cidr"].as_array().unwrap().len(), 150);
+
+        assert!(list_to_rule_set(GeoKind::DomainList, "<html>blocked</html>").is_err());
     }
 }

@@ -190,6 +190,20 @@ pub fn service_remove(app: AppHandle, store: State<'_, RoutingStore>, id: String
     store.remove_service(&app, &id);
 }
 
+/// Open an https:// link in the user's browser. On Windows through explorer.exe: the
+/// browser then starts as the user even when this app runs elevated (TUN, All in One).
+#[tauri::command]
+pub fn open_url(url: String) -> Result<(), String> {
+    if !url.starts_with("https://") || url.chars().any(|c| c.is_whitespace() || c == '"') {
+        return Err("открываются только ссылки https://".into());
+    }
+    #[cfg(windows)]
+    let result = std::process::Command::new("explorer.exe").arg(&url).spawn();
+    #[cfg(not(windows))]
+    let result = std::process::Command::new("xdg-open").arg(&url).spawn();
+    result.map(|_| ()).map_err(|e| e.to_string())
+}
+
 /// The large read-only service library the user can add presets from.
 #[tauri::command]
 pub fn services_library(app: AppHandle) -> Vec<Service> {
@@ -233,7 +247,7 @@ pub async fn geo_refresh(app: AppHandle) -> GeoRefreshResult {
     if files.is_empty() {
         return result(
             false,
-            "Нечего обновлять: нет выбранного региона и включённых сервисов с полным списком доменов (нужен режим «Rule»)".into(),
+            "Нечего обновлять: нет списков antifilter, выбранного региона и сервисов с полным списком доменов (нужен режим «Antifilter» или «Rule»)".into(),
         );
     }
     let running = app.state::<CoreState>().status().running;

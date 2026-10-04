@@ -84,6 +84,14 @@ async fn stream(app: AppHandle, url: String, event: &'static str) {
 const LOG_FLUSH: std::time::Duration = std::time::Duration::from_millis(300);
 const LOG_BATCH_MAX: usize = 150;
 
+/// Windows checks IPv6 connectivity (ipv6.msftconnecttest.com / ipv6.msftncsi.com)
+/// every few minutes; without IPv6 every probe is a «address is not valid in its
+/// context» error. Not a VPN problem — such lines are dropped.
+fn is_ipv6_probe_noise(line: &str) -> bool {
+    (line.contains("ipv6.msftconnecttest.com") || line.contains("ipv6.msftncsi.com"))
+        && line.contains("not valid in its context")
+}
+
 /// Forward log frames in batches: at most one event per `LOG_FLUSH`, carrying at most
 /// `LOG_BATCH_MAX` lines. Anything over that is dropped, with a line saying how much.
 async fn pump_logs<S>(app: &AppHandle, read: &mut S)
@@ -99,6 +107,9 @@ where
         tokio::select! {
             msg = read.next() => match msg {
                 Some(Ok(Message::Text(text))) => {
+                    if is_ipv6_probe_noise(&text) {
+                        continue;
+                    }
                     if batch.len() < LOG_BATCH_MAX {
                         batch.push(text.to_string());
                     } else {

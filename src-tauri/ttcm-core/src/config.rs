@@ -222,11 +222,11 @@ pub fn generate(opts: &GenOptions) -> Value {
                     dns_rule.insert(key.into(), v.clone());
                 }
             }
-            // Domain lists (geosite) can drive DNS too; IP lists (geoip) can't.
+            // Domain lists (geosite, antifilter domains) can drive DNS too; IP lists can't.
             if let Some(sets) = rule.get("rule_set").and_then(|v| v.as_array()) {
                 let domain_sets: Vec<Value> = sets
                     .iter()
-                    .filter(|t| t.as_str().map(|t| t.contains("geosite")).unwrap_or(false))
+                    .filter(|t| t.as_str().is_some_and(|t| t.contains("geosite") || t == "antifilter-domains"))
                     .cloned()
                     .collect();
                 if !domain_sets.is_empty() {
@@ -281,6 +281,23 @@ mod tests {
             final_action: "direct".into(),
             ..GenOptions::default()
         }
+    }
+
+    #[test]
+    fn antifilter_domains_resolve_through_the_tunnel() {
+        let opts = GenOptions {
+            route_rules: vec![
+                json!({ "ip_is_private": true, "outbound": "direct" }),
+                json!({ "rule_set": ["antifilter-domains", "antifilter-ip"], "outbound": "proxy" }),
+            ],
+            ..only_youtube()
+        };
+        let cfg = generate(&opts);
+        let dns_rules = cfg["dns"]["rules"].as_array().unwrap();
+        // The domain list drives DNS (a poisoned answer from the ISP is avoided); the IP list can't.
+        assert_eq!(dns_rules.len(), 1);
+        assert_eq!(dns_rules[0]["rule_set"], json!(["antifilter-domains"]));
+        assert_eq!(dns_rules[0]["server"], "doh-proxy");
     }
 
     #[test]

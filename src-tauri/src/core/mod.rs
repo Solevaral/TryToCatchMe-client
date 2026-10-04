@@ -581,7 +581,10 @@ fn pipe_logs<R: Read + Send + 'static>(app: AppHandle, reader: R, tail: LogTail)
             } else {
                 "info"
             };
-            if level == "error" {
+            // Ошибки отдельных соединений («ERROR [id 12ms] connection: …») приходят и по
+            // API логов — здесь их не повторяем. Остаются ошибки запуска и FATAL.
+            let per_connection = upper.split_once("ERROR ").is_some_and(|(_, rest)| rest.starts_with('['));
+            if level == "error" && !per_connection {
                 let payload =
                     serde_json::json!({ "type": level, "payload": line }).to_string();
                 let _ = app.emit("clash://log", payload);

@@ -87,24 +87,42 @@ pub struct RoutingConfig {
     /// Action for traffic that matches no rule (rule mode only).
     #[serde(default = "default_final")]
     pub final_action: String,
-    /// Antifilter mode: the antifilter.download lists go through the VPN.
+    /// Rule mode: the antifilter.download lists (blocked in Russia) go through the VPN.
     #[serde(default = "default_true")]
     pub antifilter: bool,
-    /// Antifilter mode: its own service selection (empty by default).
-    #[serde(default)]
+    /// 1.3.0 had a separate Antifilter mode with its own services and unmatched-traffic
+    /// action. Read only to move them into Rule mode (see `migrate_antifilter_mode`).
+    #[serde(default, skip_serializing)]
     pub antifilter_services: Vec<ServiceSel>,
-    /// Antifilter mode: action for traffic outside the lists and services.
-    #[serde(default = "default_antifilter_final")]
+    #[serde(default = "default_antifilter_final", skip_serializing)]
     pub antifilter_final: String,
+}
+
+impl RoutingConfig {
+    /// 1.3.0's Antifilter mode → Rule mode with the lists on, its services merged in and
+    /// its unmatched-traffic action kept. Returns true if anything changed.
+    pub fn migrate_antifilter_mode(&mut self) -> bool {
+        if self.mode != "antifilter" {
+            return false;
+        }
+        self.mode = "rule".into();
+        self.antifilter = true;
+        self.final_action = sanitize_action(&self.antifilter_final);
+        for sel in std::mem::take(&mut self.antifilter_services) {
+            if !self.services.iter().any(|s| s.id == sel.id) {
+                self.services.push(sel);
+            }
+        }
+        true
+    }
 }
 
 impl Default for RoutingConfig {
     fn default() -> Self {
-        // A fresh install: Antifilter mode (blocked lists through the VPN, the rest
-        // directly), and «direct» for unmatched traffic in Rule mode too. Configs saved
-        // by older versions keep their values (serde defaults above are unchanged).
+        // A fresh install: Rule mode, antifilter lists through the VPN, the rest directly.
+        // Configs saved by older versions keep their values (serde defaults above).
         RoutingConfig {
-            mode: "antifilter".to_string(),
+            mode: default_mode(),
             rules: Vec::new(),
             services: Vec::new(),
             region: None,
@@ -209,6 +227,7 @@ pub fn list_to_rule_set(kind: GeoKind, text: &str) -> Result<String, String> {
 }
 
 /// The downloaded geo lists that are available to the core.
+#[derive(Clone, Copy)]
 pub struct GeoInput<'a> {
     /// Folder holding the downloaded `.srs` files.
     pub dir: &'a str,
@@ -266,37 +285,7 @@ pub fn build_route(cfg: &RoutingConfig, catalog: &[Service], geo: Option<&GeoInp
             rule_sets: vec![],
             final_action: "direct".to_string(),
         },
-        "antifilter" => build_antifilter_mode(cfg, catalog, geo),
         _ => build_rule_mode(cfg, catalog, geo),
-    }
-}
-
-/// Antifilter mode: LAN direct, then this mode's own services (explicit choices win),
-/// then everything on the antifilter.download lists through the VPN, the rest per
-/// `antifilter_final`. Region and user rules are Rule-mode only.
-fn build_antifilter_mode(cfg: &RoutingConfig, catalog: &[Service], geo: Option<&GeoInput>) -> RouteSpec {
-    let mut rules: Vec<Value> = vec![json!({ "ip_is_private": true, "outbound": "direct" })];
-    let mut rule_sets: Vec<Value> = Vec::new();
-    push_service_rules(&cfg.antifilter_services, catalog, geo, &mut rules, &mut rule_sets);
-
-    if let Some(g) = geo.filter(|g| cfg.antifilter && g.antifilter_ready) {
-        let mut tags = Vec::new();
-        for f in antifilter_files() {
-            rule_sets.push(json!({
-                "type": "local",
-                "tag": f.tag,
-                "format": f.format(),
-                "path": format!("{}/{}", g.dir.trim_end_matches(['/', '\\']), f.file_name)
-            }));
-            tags.push(f.tag);
-        }
-        rules.push(json!({ "rule_set": tags, "outbound": "proxy" }));
-    }
-
-    RouteSpec {
-        rules,
-        rule_sets,
-        final_action: sanitize_action(&cfg.antifilter_final),
     }
 }
 
@@ -355,6 +344,22 @@ fn build_rule_mode(cfg: &RoutingConfig, catalog: &[Service], geo: Option<&GeoInp
     for (key, values) in group_rules(&cfg.rules) {
         let (kind, action) = key;
         rules.push(json!({ &kind: values, "outbound": action }));
+    }
+
+    // Blocked in Russia (antifilter.download) → VPN. Before the Russian-sites rule:
+    // a blocked .ru site must not go out directly.
+    if let Some(g) = geo.filter(|g| cfg.antifilter && g.antifilter_ready) {
+        let mut tags = Vec::new();
+        for f in antifilter_files() {
+            rule_sets.push(json!({
+                "type": "local",
+                "tag": f.tag,
+                "format": f.format(),
+                "path": format!("{}/{}", g.dir.trim_end_matches(['/', '\\']), f.file_name)
+            }));
+            tags.push(f.tag);
+        }
+        rules.push(json!({ "rule_set": tags, "outbound": "proxy" }));
     }
 
     // Geo rule-sets by region, as LOCAL files the app downloads itself (see
@@ -616,41 +621,60 @@ mod tests {
     }
 
     #[test]
-    fn antifilter_mode_lists_services_and_final() {
+    fn rule_mode_antifilter_before_region() {
         let cfg = RoutingConfig {
-            mode: "antifilter".into(),
-            antifilter_services: vec![ServiceSel { id: "cloudflare".into(), action: "proxy".into(), profile: None }],
+            mode: "rule".into(),
+            services: vec![ServiceSel { id: "cloudflare".into(), action: "proxy".into(), profile: None }],
+            region: Some("ru".into()),
             ..Default::default()
         };
-        let geo = GeoInput { dir: "D:/r", region_ready: false, geosites: &[], antifilter_ready: true };
+        let geo = GeoInput { dir: "D:/r", region_ready: true, geosites: &[], antifilter_ready: true };
         let spec = build_route(&cfg, &catalog(), Some(&geo));
-        // private + service + antifilter lists
-        assert_eq!(spec.rules.len(), 3);
+        // private + service + antifilter + region
+        assert_eq!(spec.rules.len(), 4);
         assert_eq!(spec.rules[2]["rule_set"], json!(["antifilter-domains", "antifilter-ip"]));
         assert_eq!(spec.rules[2]["outbound"], "proxy");
+        assert_eq!(spec.rules[3]["outbound"], "direct");
         assert_eq!(spec.rule_sets[0]["format"], "source");
         assert_eq!(spec.rule_sets[0]["path"], "D:/r/antifilter-domains.json");
         assert_eq!(spec.final_action, "direct");
 
         // Lists not downloaded yet / turned off — the rule is left out.
-        assert_eq!(build_route(&cfg, &catalog(), None).rules.len(), 2);
+        let not_ready = GeoInput { antifilter_ready: false, ..geo };
+        assert_eq!(build_route(&cfg, &catalog(), Some(&not_ready)).rules.len(), 3);
         let off = RoutingConfig { antifilter: false, ..cfg.clone() };
-        assert_eq!(build_route(&off, &catalog(), Some(&geo)).rules.len(), 2);
+        assert_eq!(build_route(&off, &catalog(), Some(&geo)).rules.len(), 3);
+    }
+
+    #[test]
+    fn antifilter_mode_of_1_3_0_moves_to_rule() {
+        let mut cfg: RoutingConfig = serde_json::from_str(
+            r#"{"mode":"antifilter","final_action":"proxy","services":[{"id":"a","action":"proxy"}],
+                "antifilter":true,"antifilter_services":[{"id":"a","action":"direct"},{"id":"b","action":"proxy"}],
+                "antifilter_final":"direct"}"#,
+        )
+        .unwrap();
+        assert!(cfg.migrate_antifilter_mode());
+        assert_eq!(cfg.mode, "rule");
+        assert!(cfg.antifilter);
+        assert_eq!(cfg.final_action, "direct");
+        let ids: Vec<_> = cfg.services.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(ids, ["a", "b"]);
+        assert!(!serde_json::to_string(&cfg).unwrap().contains("antifilter_services"));
+        assert!(!cfg.migrate_antifilter_mode());
     }
 
     #[test]
     fn fresh_install_defaults() {
         let d = RoutingConfig::default();
-        assert_eq!(d.mode, "antifilter");
+        assert_eq!(d.mode, "rule");
         assert!(d.antifilter);
         assert_eq!(d.final_action, "direct");
-        assert_eq!(d.antifilter_final, "direct");
         // An old saved config without the new fields keeps its mode and gets the list on.
         let old: RoutingConfig = serde_json::from_str(r#"{"mode":"rule","final_action":"proxy"}"#).unwrap();
         assert_eq!(old.mode, "rule");
         assert_eq!(old.final_action, "proxy");
         assert!(old.antifilter);
-        assert_eq!(old.antifilter_final, "direct");
     }
 
     #[test]

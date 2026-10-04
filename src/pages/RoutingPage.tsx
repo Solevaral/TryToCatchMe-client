@@ -38,6 +38,7 @@ export default function RoutingPage() {
   const [reloadState, setReloadState] = useState<"" | "..." | "ok" | "off">("");
   const [geoState, setGeoState] = useState<"" | "...">("");
   const [geoResult, setGeoResult] = useState<{ ok: boolean; message: string } | null>(null);
+  const [geoFrom, setGeoFrom] = useState<"ru" | "antifilter">("ru");
   const [settings, setSettings] = useState<Settings | null>(null);
   const [profiles, setProfiles] = useState<Profile[]>([]);
 
@@ -98,10 +99,8 @@ export default function RoutingPage() {
   if (!config) return <div className="placeholder">Загрузка…</div>;
 
   const setMode = (mode: string) => persist({ ...config, mode });
-  // У Rule и Antifilter свой выбор сервисов: каталог общий, галочки — у каждого режима свои.
-  const selKey = config.mode === "antifilter" ? "antifilter_services" : "services";
-  const selected = config[selKey];
-  const setSelected = (list: typeof selected) => persist({ ...config!, [selKey]: list });
+  const selected = config.services;
+  const setSelected = (services: typeof selected) => persist({ ...config!, services });
   const serviceEnabled = (id: string) => selected.some((s) => s.id === id);
   const serviceAction = (id: string): RuleAction =>
     selected.find((s) => s.id === id)?.action ?? "proxy";
@@ -119,7 +118,8 @@ export default function RoutingPage() {
     setSelected(selected.map((s) => (s.id === id ? { ...s, action } : s)));
   }
 
-  async function refreshLists() {
+  async function refreshLists(from: "ru" | "antifilter") {
+    setGeoFrom(from);
     setGeoState("...");
     setGeoResult(null);
     try {
@@ -130,13 +130,15 @@ export default function RoutingPage() {
     setGeoState("");
   }
 
-  const refreshButton = (disabled: boolean, title: string) => (
-    <button className="btn" style={{ padding: "4px 10px" }} disabled={disabled || geoState === "..."} onClick={refreshLists} title={title}>
-      {geoState === "..." ? "Скачиваю…" : "↻ Обновить списки"}
+  // Одна кнопка на карточку, скачивает все включённые списки (RU и antifilter).
+  const anyLists = !!config.region || config.antifilter;
+  const refreshButton = (from: "ru" | "antifilter", title: string) => (
+    <button className="btn" style={{ padding: "4px 10px" }} disabled={!anyLists || geoState === "..."} onClick={() => refreshLists(from)} title={title}>
+      {geoState === "..." && geoFrom === from ? "Скачиваю…" : "↻ Обновить списки"}
     </button>
   );
 
-  const refreshResult = geoResult && (
+  const refreshResult = (from: "ru" | "antifilter") => geoFrom === from && geoResult && (
     <div
       style={{
         fontSize: 12,
@@ -194,7 +196,6 @@ export default function RoutingPage() {
             { v: "global", l: "Global — всё через VPN" },
             { v: "direct", l: "Direct — всё напрямую" },
             { v: "rule", l: "Rule — по правилам" },
-            { v: "antifilter", l: "Antifilter — заблокированное через VPN" },
           ].map((m) => (
             <button
               key={m.v}
@@ -234,36 +235,7 @@ export default function RoutingPage() {
         </div>
       </div>
 
-      {config.mode === "antifilter" && (
-        <div className="card" style={{ marginBottom: 16 }}>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
-            <div style={{ fontWeight: 600 }}>Antifilter</div>
-            {refreshButton(!config.antifilter, "Скачать свежие списки antifilter (через VPN, при неудаче — напрямую). Старые списки остаются, если скачать не удалось.")}
-          </div>
-          {refreshResult}
-          <label style={{ display: "flex", gap: 10, alignItems: "flex-start" }}>
-            <input
-              type="checkbox"
-              checked={config.antifilter}
-              onChange={(e) => persist({ ...config, antifilter: e.target.checked })}
-            />
-            <span>
-              Заблокированное в России — через VPN
-              <div className="muted" style={{ fontSize: 12 }}>
-                Списки сервиса{" "}
-                <ExtLink url="https://antifilter.download/">antifilter.download</ExtLink>:
-                заблокированные домены, отобранные сообществом (
-                <ExtLink url="https://community.antifilter.download/">community.antifilter.download</ExtLink>
-                ), и заблокированные IP-подсети (allyouneed). Списки скачиваются через VPN, хранятся
-                у вас и обновляются раз в сутки. Сервисы, которые сами закрыты для России
-                (Duolingo, Fandom), и замедленный YouTube в списках нет — их можно включить ниже.
-              </div>
-            </span>
-          </label>
-        </div>
-      )}
-
-      {(config.mode === "rule" || config.mode === "antifilter") && (
+      {config.mode === "rule" && (
         <>
           {/* Services */}
           <div className="card" style={{ marginBottom: 16 }}>
@@ -338,14 +310,13 @@ export default function RoutingPage() {
             </div>
           </div>
 
-          {/* Region / geo — Rule only */}
-          {config.mode === "rule" && (
+          {/* Region / geo */}
           <div className="card" style={{ marginBottom: 16 }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
               <div style={{ fontWeight: 600 }}>Российские сайты</div>
-              {refreshButton(!config.region, "Скачать свежие списки geosite/geoip (через VPN, при неудаче — напрямую). Старые списки остаются, если скачать не удалось.")}
+              {refreshButton("ru", "Скачать свежие списки (через VPN, при неудаче — напрямую). Старые списки остаются, если скачать не удалось.")}
             </div>
-            {refreshResult}
+            {refreshResult("ru")}
             <label style={{ display: "flex", gap: 10, alignItems: "flex-start" }}>
               <input
                 type="checkbox"
@@ -364,23 +335,38 @@ export default function RoutingPage() {
               </span>
             </label>
           </div>
-          )}
+
+          {/* Antifilter */}
+          <div className="card" style={{ marginBottom: 16 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+              <div style={{ fontWeight: 600 }}>Antifilter</div>
+              {refreshButton("antifilter", "Скачать свежие списки (через VPN, при неудаче — напрямую). Старые списки остаются, если скачать не удалось.")}
+            </div>
+            {refreshResult("antifilter")}
+            <label style={{ display: "flex", gap: 10, alignItems: "flex-start" }}>
+              <input
+                type="checkbox"
+                checked={config.antifilter}
+                onChange={(e) => persist({ ...config, antifilter: e.target.checked })}
+              />
+              <span>
+                Списки с сайта <ExtLink url="https://antifilter.download/">antifilter.download</ExtLink> — через VPN
+                <div className="muted" style={{ fontSize: 12 }}>
+                  Заблокированное в России: домены, отобранные сообществом, и заблокированные
+                  IP-подсети (allyouneed). Идут через туннель раньше российских сайтов, поэтому
+                  заблокированный .ru-сайт тоже пойдёт через VPN. Сервисов, которые сами закрыты
+                  для России (Duolingo, Fandom), и замедленного YouTube в списках нет — включите
+                  их в «Сервисах». Списки скачиваются через VPN и кэшируются (обновляются раз в сутки).
+                </div>
+              </span>
+            </label>
+          </div>
 
           {/* Unmatched */}
           <div className="card">
             <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
               <span style={{ fontWeight: 600 }}>Остальной трафик:</span>
-              <select
-                value={config.mode === "antifilter" ? config.antifilter_final : config.final_action}
-                onChange={(e) =>
-                  persist(
-                    config.mode === "antifilter"
-                      ? { ...config, antifilter_final: e.target.value as RuleAction }
-                      : { ...config, final_action: e.target.value as RuleAction },
-                  )
-                }
-                style={selStyle}
-              >
+              <select value={config.final_action} onChange={(e) => persist({ ...config, final_action: e.target.value as RuleAction })} style={selStyle}>
                 {ACTIONS.filter((a) => a !== "block").map((a) => (
                   <option key={a} value={a}>{ACTION_LABEL[a]}</option>
                 ))}

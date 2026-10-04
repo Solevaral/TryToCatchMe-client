@@ -170,18 +170,14 @@ export interface Service {
 }
 
 export interface RoutingConfig {
-  mode: string; // global | direct | rule | antifilter
+  mode: string; // global | direct | rule
   rules: RoutingRule[];
   services: ServiceSel[];
   region: string | null;
   geo_action: RuleAction;
   final_action: RuleAction;
-  /** Antifilter mode: the antifilter.download lists go through the VPN. */
+  /** Rule mode: the antifilter.download lists go through the VPN. */
   antifilter: boolean;
-  /** Antifilter mode: its own service selection. */
-  antifilter_services: ServiceSel[];
-  /** Antifilter mode: traffic outside the lists and services. */
-  antifilter_final: RuleAction;
 }
 
 export interface RoutingSnapshot {

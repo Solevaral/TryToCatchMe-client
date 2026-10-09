@@ -51,5 +51,6 @@
   {"id": "dw", "name": "DW", "icon": "📡", "domains": ["dw.com"], "ip_cidrs": []},
   {"id": "svoboda", "name": "Радио Свобода", "icon": "📻", "domains": ["svoboda.org", "rferl.org", "currenttime.tv"], "ip_cidrs": []},
   {"id": "fandom", "name": "Fandom", "icon": "📖", "domains": ["fandom.com", "wikia.com", "wikia.org", "nocookie.net"], "ip_cidrs": []},
-  {"id": "tiermaker", "name": "TierMaker", "icon": "🏆", "domains": ["tiermaker.com"], "ip_cidrs": []}
+  {"id": "tiermaker", "name": "TierMaker", "icon": "🏆", "domains": ["tiermaker.com"], "ip_cidrs": []},
+  {"id": "factorio", "name": "Factorio", "icon": "⚙️", "domains": ["factorio.com"], "ip_cidrs": []}
 ]

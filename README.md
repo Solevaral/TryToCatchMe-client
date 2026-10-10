@@ -50,8 +50,10 @@ installer and a Linux AppImage.
   the system at its local port and restores the original on disconnect, even after a
   crash. Windows (WinINet) and Linux (GNOME / KDE). If another app takes the proxy
   over, you are told and can re-apply it in one click.
-- **TUN** — captures all traffic, including apps that ignore the proxy (needs admin
-  rights; the app offers to relaunch elevated). The system proxy is pointed at the app
+- **TUN** — captures all traffic, including apps that ignore the proxy. Windows needs
+  admin rights (the app offers to relaunch elevated); on Linux the app stays a normal
+  user process and asks for the password once, on the first TUN connect, to install
+  the core into `/opt/trytocatchme` with network capabilities. The system proxy is pointed at the app
   in TUN mode too, so apps that read it (Electron apps, browsers) can't be sent past
   the tunnel by a proxy another client left behind.
 - Copy-ready `HTTP_PROXY` / `HTTPS_PROXY` commands for PowerShell, cmd and bash/zsh,

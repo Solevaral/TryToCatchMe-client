@@ -1,6 +1,6 @@
 {
   "name": "trytocatchme-client",
-  "version": "1.3.2",
+  "version": "1.3.3",
   "description": "Cross-platform VPN/proxy client (Tauri + Rust + sing-box)",
   "type": "module",
   "scripts": {

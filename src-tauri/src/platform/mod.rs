@@ -3,6 +3,8 @@
 
 #[cfg(windows)]
 pub mod win;
+#[cfg(target_os = "linux")]
+pub mod linux;
 
 /// Whether the current process has the privileges TUN mode needs.
 #[cfg(windows)]
@@ -19,7 +21,8 @@ pub fn relaunch_elevated() -> Result<(), String> {
 
 #[cfg(not(windows))]
 pub fn is_elevated() -> bool {
-    // On non-Windows we don't gate TUN here yet.
+    // Not gated here: on Linux the core itself gets CAP_NET_ADMIN on connect
+    // (see linux::tun_core), the app never needs to be relaunched as root.
     true
 }
 

@@ -182,6 +182,20 @@ impl CoreState {
             );
         }
 
+        // Linux: the GUI stays a user process, sing-box gets CAP_NET_ADMIN instead —
+        // installed once, behind the system password dialog.
+        #[cfg(target_os = "linux")]
+        let (bin, work_dir) = if tun {
+            let b = crate::platform::linux::tun_core(&bin).map_err(|e| {
+                format!("TUN недоступен: {e}. Подключитесь ещё раз или переключите «Перехват трафика» на «Системный прокси».")
+            })?;
+            app_log(app, format!("Ядро для TUN: {}", b.display()));
+            let d = b.parent().map(PathBuf::from).unwrap_or(work_dir);
+            (b, d)
+        } else {
+            (bin, work_dir)
+        };
+
         ensure_port_free(CLASH_CONTROLLER, "Clash API")?;
         ensure_port_free(&format!("{MIXED_LISTEN}:{port}"), "локальный прокси")?;
         if proxy_outbound.is_some() {
@@ -368,8 +382,8 @@ impl CoreState {
         self.start(app)
     }
 
-    /// Stop the core and give the system proxy back. sing-box is hard-killed (there is
-    /// no graceful stop signal on Windows), which is exactly why the app — not sing-box —
+    /// Stop the core and give the system proxy back. On Windows sing-box is hard-killed
+    /// (there is no graceful stop signal there), which is exactly why the app — not sing-box —
     /// owns the system proxy: the kill can no longer leave it pointing at a dead port.
     pub fn stop(&self, app: &AppHandle) -> Result<(), String> {
         self.expected.store(false, Ordering::SeqCst);
@@ -377,6 +391,8 @@ impl CoreState {
             let mut g = self.inner.lock();
             match g.child.take() {
                 Some(mut child) => {
+                    #[cfg(unix)]
+                    terminate(&mut child);
                     let r = child.kill().map_err(|e| format!("не удалось остановить sing-box: {e}"));
                     let _ = child.wait();
                     r
@@ -611,6 +627,22 @@ fn resolve_singbox(app: &AppHandle) -> Result<PathBuf, String> {
         return Ok(dev);
     }
     Err("sing-box binary not found (run scripts/fetch-core.ps1 or fetch-core.sh)".to_string())
+}
+
+/// Unix: SIGTERM first, so sing-box removes its TUN routes and ip rules itself; the
+/// caller's kill() is the fallback if it hasn't exited within 3 s.
+#[cfg(unix)]
+fn terminate(child: &mut Child) {
+    unsafe {
+        libc::kill(child.id() as libc::pid_t, libc::SIGTERM);
+    }
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while Instant::now() < deadline {
+        if let Ok(Some(_)) = child.try_wait() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
 }
 
 /// Prevent a console window from flashing when spawning the child on Windows.

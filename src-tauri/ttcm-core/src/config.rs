@@ -48,6 +48,12 @@ pub struct GenOptions {
     /// the tun's), hijack-dns hands it back to `local` — a loop that kills all DNS.
     /// Empty => `local` (system resolver), as everywhere else.
     pub direct_dns: Vec<String>,
+    /// TUN mode: give the tun an IPv6 address (and so an IPv6 default route). Off when
+    /// the uplink has no IPv6: otherwise the system believes IPv6 works (the tun's ULA
+    /// counts for getaddrinfo's AI_ADDRCONFIG), apps connect to AAAA addresses, the
+    /// core accepts the connection and can't dial it out — a TLS error instead of the
+    /// IPv4 fallback.
+    pub tun_ipv6: bool,
 }
 
 impl Default for GenOptions {
@@ -64,8 +70,23 @@ impl Default for GenOptions {
             block_quic: false,
             tun: false,
             direct_dns: Vec::new(),
+            tun_ipv6: true,
         }
     }
+}
+
+/// Does a /proc/net/if_inet6 listing show a usable IPv6 uplink: a global-scope,
+/// non-ULA address on a physical interface? (The tun's own fdfe:: ULA, Docker / VPN
+/// adapters and loopback don't count.)
+pub fn has_global_ipv6(if_inet6: &str) -> bool {
+    if_inet6.lines().any(|line| {
+        let f: Vec<&str> = line.split_whitespace().collect();
+        // address, ifindex, prefix length, scope, flags, interface
+        let [addr, _, _, scope, _, iface] = f[..] else { return false };
+        let ula = addr.len() == 32 && matches!(&addr[..2], "fc" | "fd");
+        scope == "00" && !ula && iface != "lo" && iface != TUN_IFACE_LINUX
+            && !crate::gateway::is_virtual(iface, "")
+    })
 }
 
 /// The TUN adapter's own addresses (the tun's DNS lives in these subnets).
@@ -210,7 +231,7 @@ pub fn generate(opts: &GenOptions) -> Value {
         let mut tun = json!({
             "type": "tun",
             "tag": "tun-in",
-            "address": TUN_ADDRESSES,
+            "address": if opts.tun_ipv6 { &TUN_ADDRESSES[..] } else { &TUN_ADDRESSES[..1] },
             "auto_route": true,
             // strict_route stays off: the app stops the core with a hard kill, and
             // strict rules could leave the machine without internet after an
@@ -403,6 +424,27 @@ mod tests {
         // TUN without a known upstream: also the system resolver (Windows, macOS).
         let cfg = generate(&GenOptions { tun: true, ..only_youtube() });
         assert_eq!(cfg["dns"]["servers"][0]["type"], "local");
+    }
+
+    #[test]
+    fn tun_ipv6_address_only_with_ipv6_uplink() {
+        let cfg = generate(&GenOptions { tun: true, ..only_youtube() });
+        assert_eq!(cfg["inbounds"][0]["address"], json!(["172.18.0.1/30", "fdfe:dcba:9876::1/126"]));
+        let cfg = generate(&GenOptions { tun: true, tun_ipv6: false, ..only_youtube() });
+        assert_eq!(cfg["inbounds"][0]["address"], json!(["172.18.0.1/30"]));
+    }
+
+    #[test]
+    fn global_ipv6_ignores_link_local_ula_tun_and_virtual() {
+        // No IPv6 from the ISP: link-local, loopback, the tun's ULA only.
+        let none = "fe80000000000000bf77d3fbb64bb2e6 02 40 20 80  enp34s0\n\
+                    00000000000000000000000000000001 01 80 10 80       lo\n\
+                    fdfedcba987600000000000000000001 24 7e 00 80    ttcm0\n\
+                    fd000000000000000000000000000001 05 40 00 80  enp34s0\n\
+                    2a0200000000000000000000000000aa 06 40 00 80  docker0";
+        assert!(!has_global_ipv6(none));
+        let real = format!("{none}\n2a0206b8000000000000000000000001 02 40 00 00  enp34s0");
+        assert!(has_global_ipv6(&real));
     }
 
     #[test]

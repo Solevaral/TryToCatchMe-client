@@ -55,6 +55,12 @@ pub fn upstream_dns() -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// The network has real IPv6 (a global address on a physical interface). Unreadable
+/// /proc: assume yes, as before.
+pub fn uplink_has_ipv6() -> bool {
+    fs::read_to_string("/proc/net/if_inet6").map_or(true, |t| ttcm_core::config::has_global_ipv6(&t))
+}
+
 fn is_root() -> bool {
     unsafe { libc::geteuid() == 0 }
 }

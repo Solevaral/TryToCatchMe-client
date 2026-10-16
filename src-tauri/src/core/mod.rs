@@ -210,6 +210,15 @@ impl CoreState {
                 ),
             }
         }
+        // Linux TUN: no IPv6 on the tun unless the uplink really has it (see
+        // GenOptions::tun_ipv6). Windows keeps the old behaviour.
+        #[cfg(target_os = "linux")]
+        let tun_ipv6 = crate::platform::linux::uplink_has_ipv6();
+        #[cfg(not(target_os = "linux"))]
+        let tun_ipv6 = true;
+        if tun && !tun_ipv6 {
+            app_log(app, "IPv6 у сети нет — TUN только IPv4".to_string());
+        }
 
         ensure_port_free(CLASH_CONTROLLER, "Clash API")?;
         ensure_port_free(&format!("{MIXED_LISTEN}:{port}"), "локальный прокси")?;
@@ -231,6 +240,7 @@ impl CoreState {
             block_quic: settings.block_quic,
             tun,
             direct_dns: direct_dns.clone(),
+            tun_ipv6,
             // `info` logs every connection — real CPU cost in TUN mode.
             log_level: if settings.verbose_logs { "info".into() } else { "warn".into() },
         };

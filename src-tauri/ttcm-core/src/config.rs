@@ -19,6 +19,11 @@ pub fn geo_port(mixed_port: u16) -> u16 {
     mixed_port.saturating_add(1)
 }
 
+/// Port of the app's PAC server for the system proxy: always the proxy port + 2.
+pub fn pac_port(mixed_port: u16) -> u16 {
+    mixed_port.saturating_add(2)
+}
+
 pub struct GenOptions {
     /// Port of the local mixed (HTTP+SOCKS) proxy. The OS system proxy itself is
     /// managed by the app, never by sing-box: the core is stopped with a hard kill, and

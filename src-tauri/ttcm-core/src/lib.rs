@@ -6,6 +6,7 @@
 pub mod config;
 pub mod gateway;
 pub mod links;
+pub mod pac;
 pub mod routing;
 pub mod subscription;
 pub mod sysproxy;

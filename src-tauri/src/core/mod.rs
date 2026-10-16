@@ -282,9 +282,25 @@ impl CoreState {
         // In TUN mode too: apps that read the system proxy (Electron apps like Claude
         // Desktop, browsers) connect to whatever it points at, and a proxy left by
         // another client (e.g. Hiddify) would send them past the tunnel entirely.
-        match app.state::<SysProxyState>().apply(app, port) {
-            Ok(()) if tun => app_log(app, format!("Системный прокси тоже направлен в VPN: {MIXED_LISTEN}:{port} (программы, читающие прокси, не уйдут мимо TUN)")),
-            Ok(()) => app_log(app, format!("Системный прокси включён: {MIXED_LISTEN}:{port}")),
+        // Linux: a PAC script with the same routing, so apps send only VPN-routed hosts
+        // to the proxy and connect directly otherwise (see ttcm_core::pac).
+        #[cfg(target_os = "linux")]
+        let pac = Some(pac_script(&bin, &spec.rules, &spec.rule_sets, &spec.final_action, port));
+        #[cfg(not(target_os = "linux"))]
+        let pac: Option<String> = None;
+        let with_pac = pac.is_some();
+        match app.state::<SysProxyState>().apply(app, port, pac) {
+            Ok(note) => {
+                if let Some(n) = note {
+                    app_error(app, n);
+                }
+                let how = if with_pac { " (PAC: в прокси только то, что идёт через VPN)" } else { "" };
+                if tun {
+                    app_log(app, format!("Системный прокси тоже направлен в VPN: {MIXED_LISTEN}:{port}{how} (программы, читающие прокси, не уйдут мимо TUN)"));
+                } else {
+                    app_log(app, format!("Системный прокси включён: {MIXED_LISTEN}:{port}{how}"));
+                }
+            }
             Err(e) if tun => app_error(
                 app,
                 format!("TUN работает, но системный прокси перенаправить не удалось: {e}. Программы, использующие системный прокси, могут идти мимо VPN."),
@@ -549,6 +565,41 @@ fn app_error(app: &AppHandle, msg: String) {
 }
 
 /// Fail early with a clear message if a port we need is taken by another program.
+/// PAC script for the system proxy from the same route rules sing-box runs. Rule-set
+/// files are read here: source JSON as is, binary .srs decompiled by the core. A list
+/// that can't be read is left out (its rule then just doesn't match).
+#[cfg(target_os = "linux")]
+fn pac_script(
+    bin: &std::path::Path,
+    rules: &[serde_json::Value],
+    rule_sets: &[serde_json::Value],
+    final_action: &str,
+    port: u16,
+) -> String {
+    let mut sets = std::collections::HashMap::new();
+    for rs in rule_sets {
+        let (Some(tag), Some(path)) = (rs["tag"].as_str(), rs["path"].as_str()) else { continue };
+        let text = if rs["format"] == "binary" {
+            let out = std::env::temp_dir().join(format!("ttcm-pac-{}-{tag}.json", std::process::id()));
+            let ok = Command::new(bin)
+                .args(["rule-set", "decompile", "-o"])
+                .arg(&out)
+                .arg(path)
+                .output()
+                .is_ok_and(|o| o.status.success());
+            let text = ok.then(|| fs::read_to_string(&out).ok()).flatten();
+            let _ = fs::remove_file(&out);
+            text
+        } else {
+            fs::read_to_string(path).ok()
+        };
+        if let Some(Ok(data)) = text.map(|t| ttcm_core::pac::parse_rule_set(&t)) {
+            sets.insert(tag.to_string(), data);
+        }
+    }
+    ttcm_core::pac::generate(rules, final_action, &sets, &format!("{MIXED_LISTEN}:{port}"))
+}
+
 fn ensure_port_free(addr: &str, what: &str) -> Result<(), String> {
     std::net::TcpListener::bind(addr).map(|_| ()).map_err(|_| {
         format!("порт {addr} ({what}) занят другой программой — закройте её или другой VPN-клиент, использующий этот порт")

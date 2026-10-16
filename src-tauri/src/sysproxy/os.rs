@@ -16,6 +16,14 @@ use ttcm_core::sysproxy::{windows_server_points_to, WINDOWS_BYPASS};
 
 pub const HOST: &str = "127.0.0.1";
 
+/// Path of the PAC script on the app's PAC server (see `super::pac_server`).
+pub const PAC_PATH: &str = "/proxy.pac";
+
+/// PAC URL for the given proxy port, without the cache-busting query.
+pub fn pac_url_base(port: u16) -> String {
+    format!("http://{HOST}:{}{PAC_PATH}", ttcm_core::config::pac_port(port))
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
 pub struct Snapshot {
     #[serde(default)]
@@ -161,7 +169,8 @@ mod imp {
         Ok(())
     }
 
-    pub fn apply(host: &str, port: u16) -> Result<(), String> {
+    /// Windows keeps the plain proxy: `_pac` is ignored.
+    pub fn apply(host: &str, port: u16, _pac: Option<&str>) -> Result<(), String> {
         write(&WinSnap {
             flags: PROXY_TYPE_DIRECT | PROXY_TYPE_PROXY,
             server: Some(format!("{host}:{port}")),
@@ -218,7 +227,7 @@ mod imp {
     use super::*;
     use std::process::Command;
 
-    const GNOME_KEYS: [(&str, &str); 8] = [
+    const GNOME_KEYS: [(&str, &str); 9] = [
         ("org.gnome.system.proxy", "ignore-hosts"),
         ("org.gnome.system.proxy.http", "host"),
         ("org.gnome.system.proxy.http", "port"),
@@ -226,13 +235,43 @@ mod imp {
         ("org.gnome.system.proxy.https", "port"),
         ("org.gnome.system.proxy.socks", "host"),
         ("org.gnome.system.proxy.socks", "port"),
+        ("org.gnome.system.proxy", "autoconfig-url"),
         // `mode` last so restore switches the proxy on/off after the values are back.
         ("org.gnome.system.proxy", "mode"),
     ];
-    const KDE_KEYS: [&str; 5] = ["ProxyType", "httpProxy", "httpsProxy", "socksProxy", "NoProxyFor"];
+    const KDE_KEYS: [&str; 6] = ["ProxyType", "httpProxy", "httpsProxy", "socksProxy", "NoProxyFor", "Proxy Config Script"];
 
-    fn run(cmd: &str, args: &[&str]) -> Option<String> {
-        let out = Command::new(cmd).args(args).output().ok()?;
+    /// A host tool (gsettings, kwriteconfig, dbus-send) without the AppImage's runtime
+    /// environment. The AppImage points GIO at its bundled modules, which lack dconf:
+    /// gsettings then silently writes to ~/.config/glib-2.0/settings/keyfile instead of
+    /// the real settings, and Firefox (which reads dconf) never sees the proxy.
+    fn cmd(name: &str) -> Command {
+        let mut c = Command::new(name);
+        if let Ok(appdir) = std::env::var("APPDIR") {
+            for var in [
+                "GIO_EXTRA_MODULES", "GSETTINGS_SCHEMA_DIR", "LD_LIBRARY_PATH", "GDK_PIXBUF_MODULE_FILE",
+                "GDK_PIXBUF_MODULEDIR", "GTK_PATH", "GTK_EXE_PREFIX", "GTK_DATA_PREFIX", "QT_PLUGIN_PATH",
+                "PYTHONHOME", "PYTHONPATH", "PERLLIB",
+            ] {
+                c.env_remove(var);
+            }
+            let dirs: Vec<String> = std::env::var("XDG_DATA_DIRS")
+                .unwrap_or_default()
+                .split(':')
+                .filter(|d| !d.is_empty() && !d.starts_with(&appdir))
+                .map(str::to_string)
+                .collect();
+            if dirs.is_empty() {
+                c.env_remove("XDG_DATA_DIRS");
+            } else {
+                c.env("XDG_DATA_DIRS", dirs.join(":"));
+            }
+        }
+        c
+    }
+
+    fn run(name: &str, args: &[&str]) -> Option<String> {
+        let out = cmd(name).args(args).output().ok()?;
         if out.status.success() {
             Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
         } else {
@@ -245,8 +284,8 @@ mod imp {
     }
 
     /// A command exists if it can be spawned at all.
-    fn exists(cmd: &str) -> bool {
-        Command::new(cmd).arg("--help").output().is_ok()
+    fn exists(name: &str) -> bool {
+        cmd(name).arg("--help").output().is_ok()
     }
 
     fn kde_tools() -> Option<(&'static str, &'static str)> {
@@ -266,11 +305,11 @@ mod imp {
         } else {
             args.push(value);
         }
-        let _ = Command::new(w).args(&args).status();
+        let _ = cmd(w).args(&args).status();
     }
 
     fn kde_notify() {
-        let _ = Command::new("dbus-send")
+        let _ = cmd("dbus-send")
             .args([
                 "--type=signal",
                 "/KIO/Scheduler",
@@ -301,20 +340,29 @@ mod imp {
         Ok(snap)
     }
 
-    pub fn apply(host: &str, port: u16) -> Result<(), String> {
+    /// With `pac` (the usual case) the system proxy is "automatic" with our PAC URL:
+    /// only VPN-routed hosts reach the local proxy. Without it, a plain manual proxy.
+    pub fn apply(host: &str, port: u16, pac: Option<&str>) -> Result<(), String> {
         let mut done = false;
         if gnome_available() {
             let h = format!("'{host}'");
             let p = port.to_string();
             for scheme in ["http", "https", "socks"] {
                 let schema = format!("org.gnome.system.proxy.{scheme}");
-                let _ = Command::new("gsettings").args(["set", &schema, "host", &h]).status();
-                let _ = Command::new("gsettings").args(["set", &schema, "port", &p]).status();
+                let _ = cmd("gsettings").args(["set", &schema, "host", &h]).status();
+                let _ = cmd("gsettings").args(["set", &schema, "port", &p]).status();
             }
-            let _ = Command::new("gsettings")
+            let _ = cmd("gsettings")
                 .args(["set", "org.gnome.system.proxy", "ignore-hosts", GNOME_BYPASS])
                 .status();
-            let _ = Command::new("gsettings").args(["set", "org.gnome.system.proxy", "mode", "'manual'"]).status();
+            let mode = match pac {
+                Some(url) => {
+                    let _ = cmd("gsettings").args(["set", "org.gnome.system.proxy", "autoconfig-url", &format!("'{url}'")]).status();
+                    "'auto'"
+                }
+                None => "'manual'",
+            };
+            let _ = cmd("gsettings").args(["set", "org.gnome.system.proxy", "mode", mode]).status();
             done = true;
         }
         if let Some((_, w)) = kde_tools() {
@@ -322,7 +370,13 @@ mod imp {
             kde_write(w, "httpsProxy", &kde_proxy_value("http", host, port));
             kde_write(w, "socksProxy", &kde_proxy_value("socks", host, port));
             kde_write(w, "NoProxyFor", "localhost,127.0.0.1,::1");
-            kde_write(w, "ProxyType", "1");
+            match pac {
+                Some(url) => {
+                    kde_write(w, "Proxy Config Script", url);
+                    kde_write(w, "ProxyType", "2");
+                }
+                None => kde_write(w, "ProxyType", "1"),
+            }
             kde_notify();
             done = true;
         }
@@ -336,7 +390,7 @@ mod imp {
     pub fn restore(s: &Snapshot) -> Result<(), String> {
         if let Some(values) = &s.gnome {
             for (schema, key, value) in values {
-                let _ = Command::new("gsettings").args(["set", schema, key, value]).status();
+                let _ = cmd("gsettings").args(["set", schema, key, value]).status();
             }
         }
         if let (Some(values), Some((_, w))) = (&s.kde, kde_tools()) {
@@ -364,13 +418,21 @@ mod imp {
         }
     }
 
+    /// Ours: a manual proxy at host:port, or "automatic" with our PAC URL.
     pub fn points_to(host: &str, port: u16) -> bool {
-        let gnome = gnome_available()
-            && run("gsettings", &["get", "org.gnome.system.proxy", "mode"]).map(|m| gvariant_plain(&m)) == Some("manual".into())
-            && run("gsettings", &["get", "org.gnome.system.proxy.http", "host"]).map(|v| gvariant_plain(&v)) == Some(host.into())
-            && run("gsettings", &["get", "org.gnome.system.proxy.http", "port"]).map(|v| gvariant_plain(&v)) == Some(port.to_string());
+        let pac = pac_url_base(port);
+        let gget = |schema: &str, key: &str| run("gsettings", &["get", schema, key]).map(|v| gvariant_plain(&v)).unwrap_or_default();
+        let gnome = gnome_available() && match gget("org.gnome.system.proxy", "mode").as_str() {
+            "manual" => gget("org.gnome.system.proxy.http", "host") == host && gget("org.gnome.system.proxy.http", "port") == port.to_string(),
+            "auto" => gget("org.gnome.system.proxy", "autoconfig-url").starts_with(&pac),
+            _ => false,
+        };
         let kde = kde_tools()
-            .map(|(r, _)| kde_read(r, "ProxyType") == "1" && kde_value_points_to(&kde_read(r, "httpProxy"), host, port))
+            .map(|(r, _)| match kde_read(r, "ProxyType").as_str() {
+                "1" => kde_value_points_to(&kde_read(r, "httpProxy"), host, port),
+                "2" => kde_read(r, "Proxy Config Script").starts_with(&pac),
+                _ => false,
+            })
             .unwrap_or(false);
         gnome || kde
     }
@@ -388,7 +450,11 @@ mod imp {
         }
         if let Some((r, _)) = kde_tools() {
             let t = kde_read(r, "ProxyType");
-            return if t == "1" { format!("{} · вкл", kde_read(r, "httpProxy")) } else { "выкл".into() };
+            return match t.as_str() {
+                "1" => format!("{} · вкл", kde_read(r, "httpProxy")),
+                "2" => "автоматически (PAC)".into(),
+                _ => "выкл".into(),
+            };
         }
         "не поддерживается (задайте вручную)".into()
     }
@@ -398,7 +464,7 @@ mod imp {
 mod imp {
     use super::*;
     pub fn snapshot() -> Result<Snapshot, String> { Err("системный прокси не поддерживается на этой ОС".into()) }
-    pub fn apply(_: &str, _: u16) -> Result<(), String> { Err("системный прокси не поддерживается на этой ОС".into()) }
+    pub fn apply(_: &str, _: u16, _: Option<&str>) -> Result<(), String> { Err("системный прокси не поддерживается на этой ОС".into()) }
     pub fn restore(_: &Snapshot) -> Result<(), String> { Ok(()) }
     pub fn disabled() -> Snapshot { Snapshot::default() }
     pub fn points_to(_: &str, _: u16) -> bool { false }

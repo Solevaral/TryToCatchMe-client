@@ -6,6 +6,7 @@
 //! clobbered. The on-disk backup lets the next launch clean up after a crash or a kill.
 
 pub mod os;
+pub mod pac_server;
 
 use std::fs;
 use std::path::PathBuf;
@@ -29,6 +30,9 @@ pub struct SysProxyState {
     applied: Mutex<Option<u16>>,
     /// Set once we've warned about an overwrite, until the proxy is ours again.
     overwrite_reported: AtomicBool,
+    /// PAC URL currently set (Linux), so `reapply` restores the same mode.
+    pac_url: Mutex<Option<String>>,
+    pac: pac_server::PacServer,
 }
 
 #[derive(Serialize, Clone)]
@@ -67,7 +71,9 @@ fn delete_backup(app: &AppHandle) {
 
 impl SysProxyState {
     /// Point the system proxy at `127.0.0.1:port`, remembering the previous settings.
-    pub fn apply(&self, app: &AppHandle, port: u16) -> Result<(), String> {
+    /// With a PAC script (Linux) the proxy becomes "automatic": only the hosts the
+    /// script sends to the proxy reach it. Returns a note when the PAC couldn't be used.
+    pub fn apply(&self, app: &AppHandle, port: u16, pac: Option<String>) -> Result<Option<String>, String> {
         // Reuse a leftover backup (previous crash): the live settings are then OUR stale
         // proxy, and restoring them would keep the machine pointed at a dead port.
         let snapshot = match read_backup(app) {
@@ -76,16 +82,29 @@ impl SysProxyState {
             None => os::snapshot()?,
         };
         write_backup(app, &Backup { port, snapshot })?;
-        os::apply(HOST, port)?;
+        let mut note = None;
+        let pac_url = pac.and_then(|script| match self.pac.serve(ttcm_core::config::pac_port(port), script) {
+            // A fresh query each connect: apps re-fetch the script when the URL changes.
+            Ok(()) => Some(format!("{}?{}", os::pac_url_base(port), std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0))),
+            Err(e) => {
+                note = Some(format!("{e} — системный прокси включён целиком, без PAC"));
+                None
+            }
+        });
+        os::apply(HOST, port, pac_url.as_deref())?;
+        *self.pac_url.lock() = pac_url;
         *self.applied.lock() = Some(port);
         self.overwrite_reported.store(false, Ordering::SeqCst);
-        Ok(())
+        Ok(note)
     }
 
     /// Put the user's previous settings back (if the proxy still points at us).
     /// Returns a message for the log when something was restored or skipped.
     pub fn release(&self, app: &AppHandle) -> Option<String> {
         let port = self.applied.lock().take()?;
+        self.pac.set_direct();
+        *self.pac_url.lock() = None;
         let backup = read_backup(app);
         let msg = if os::points_to(HOST, port) {
             let snap = backup.map(|b| b.snapshot).unwrap_or_else(os::disabled);
@@ -128,7 +147,7 @@ impl SysProxyState {
     /// Re-point the system proxy at us after another program overwrote it.
     pub fn reapply(&self) -> Result<(), String> {
         let port = (*self.applied.lock()).ok_or("VPN не подключён в режиме системного прокси")?;
-        os::apply(HOST, port)?;
+        os::apply(HOST, port, self.pac_url.lock().as_deref())?;
         self.overwrite_reported.store(false, Ordering::SeqCst);
         Ok(())
     }

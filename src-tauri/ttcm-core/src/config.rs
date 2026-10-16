@@ -42,6 +42,12 @@ pub struct GenOptions {
     /// TUN mode: capture ALL system traffic via a virtual adapter (needs admin).
     /// When false, only the local mixed proxy + OS system-proxy setting are used.
     pub tun: bool,
+    /// TUN mode: upstream DNS server for `dns-direct`, queried by the core itself
+    /// instead of the system resolver. Needed on Linux with systemd-resolved: the
+    /// `local` server asks resolved, resolved sends the query into the tun (its DNS is
+    /// the tun's), hijack-dns hands it back to `local` — a loop that kills all DNS.
+    /// Empty => `local` (system resolver), as everywhere else.
+    pub direct_dns: Vec<String>,
 }
 
 impl Default for GenOptions {
@@ -57,8 +63,47 @@ impl Default for GenOptions {
             dns_doh: true,
             block_quic: false,
             tun: false,
+            direct_dns: Vec::new(),
         }
     }
+}
+
+/// The TUN adapter's own addresses (the tun's DNS lives in these subnets).
+const TUN_ADDRESSES: [&str; 2] = ["172.18.0.1/30", "fdfe:dcba:9876::1/126"];
+
+fn in_tun_subnet(ip: std::net::IpAddr) -> bool {
+    match ip {
+        // 172.18.0.0/30
+        std::net::IpAddr::V4(v4) => v4.octets()[..3] == [172, 18, 0] && v4.octets()[3] < 4,
+        // fdfe:dcba:9876::/126
+        std::net::IpAddr::V6(v6) => {
+            let s = v6.segments();
+            s[..7] == [0xfdfe, 0xdcba, 0x9876, 0, 0, 0, 0] && s[7] < 4
+        }
+    }
+}
+
+/// Real upstream DNS servers from a resolv.conf-style file (systemd-resolved's
+/// /run/systemd/resolve/resolv.conf or a plain /etc/resolv.conf): skips loopback stubs
+/// (127.0.0.53 is resolved itself — the loop), link-local scoped addresses and the
+/// tun's own DNS left over from a previous connection.
+pub fn upstream_nameservers(resolv_conf: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for line in resolv_conf.lines() {
+        let mut parts = line.split_whitespace();
+        if parts.next() != Some("nameserver") {
+            continue;
+        }
+        let Some(Ok(ip)) = parts.next().map(|s| s.parse::<std::net::IpAddr>()) else { continue };
+        if ip.is_loopback() || ip.is_unspecified() || in_tun_subnet(ip) {
+            continue;
+        }
+        let s = ip.to_string();
+        if !out.contains(&s) {
+            out.push(s);
+        }
+    }
+    out
 }
 
 /// Route-rule matcher keys that DNS rules understand too (used to mirror proxied
@@ -165,7 +210,7 @@ pub fn generate(opts: &GenOptions) -> Value {
         let mut tun = json!({
             "type": "tun",
             "tag": "tun-in",
-            "address": ["172.18.0.1/30", "fdfe:dcba:9876::1/126"],
+            "address": TUN_ADDRESSES,
             "auto_route": true,
             // strict_route stays off: the app stops the core with a hard kill, and
             // strict rules could leave the machine without internet after an
@@ -201,7 +246,14 @@ pub fn generate(opts: &GenOptions) -> Value {
     // NOTE: never give a server `detour: "direct"` — sing-box 1.14 rejects a detour to
     // the empty direct outbound at runtime even though `sing-box check` accepts it.
     let doh = has_proxy && opts.dns_doh;
-    let mut servers = vec![json!({ "type": "local", "tag": "dns-direct" })];
+    // In TUN mode with a known upstream the core dials it itself: its own sockets are
+    // bound to the physical interface (auto_detect_interface), so the query never
+    // re-enters the tun.
+    let dns_direct = match opts.direct_dns.first() {
+        Some(server) if opts.tun => json!({ "type": "udp", "tag": "dns-direct", "server": server }),
+        _ => json!({ "type": "local", "tag": "dns-direct" }),
+    };
+    let mut servers = vec![dns_direct];
     let mut dns_rules = Vec::new();
     if doh {
         servers.push(json!({
@@ -332,6 +384,41 @@ mod tests {
         assert_eq!(cfg["inbounds"][0]["type"], "tun");
         // sing-box must never own the system proxy (a hard kill would leave it behind).
         assert!(cfg["inbounds"].as_array().unwrap().iter().all(|i| i.get("set_system_proxy").is_none()));
+    }
+
+    #[test]
+    fn tun_with_upstream_dials_dns_itself() {
+        let direct_dns = vec!["192.168.1.1".to_string(), "1.1.1.1".to_string()];
+        let cfg = generate(&GenOptions { tun: true, direct_dns: direct_dns.clone(), ..only_youtube() });
+        let direct = &cfg["dns"]["servers"][0];
+        assert_eq!(direct["tag"], "dns-direct");
+        assert_eq!(direct["type"], "udp");
+        assert_eq!(direct["server"], "192.168.1.1");
+        // Outbound server domains still resolve through it.
+        assert_eq!(cfg["route"]["default_domain_resolver"]["server"], "dns-direct");
+
+        // Without TUN nothing captures the resolver's queries: keep the system resolver.
+        let cfg = generate(&GenOptions { direct_dns, ..only_youtube() });
+        assert_eq!(cfg["dns"]["servers"][0]["type"], "local");
+        // TUN without a known upstream: also the system resolver (Windows, macOS).
+        let cfg = generate(&GenOptions { tun: true, ..only_youtube() });
+        assert_eq!(cfg["dns"]["servers"][0]["type"], "local");
+    }
+
+    #[test]
+    fn upstream_nameservers_skip_stub_and_tun() {
+        let resolved = "# This is /run/systemd/resolve/resolv.conf\n\
+                        nameserver 192.168.20.1\n\
+                        nameserver 1.1.1.1\n\
+                        nameserver 172.18.0.2\n\
+                        nameserver fdfe:dcba:9876::2\n\
+                        nameserver 2606:4700:4700::1111\n\
+                        nameserver 1.1.1.1\n\
+                        search lan\n";
+        assert_eq!(upstream_nameservers(resolved), ["192.168.20.1", "1.1.1.1", "2606:4700:4700::1111"]);
+        let stub = "# Generated by NetworkManager\nnameserver 127.0.0.53\noptions edns0 trust-ad\n";
+        assert!(upstream_nameservers(stub).is_empty());
+        assert_eq!(upstream_nameservers("nameserver fe80::1%enp34s0\nnameserver ::1\nnameserver 9.9.9.9"), ["9.9.9.9"]);
     }
 
     #[test]

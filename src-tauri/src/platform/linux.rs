@@ -43,6 +43,18 @@ polkit.addRule(function(action, subject) {
 });
 "#;
 
+/// Upstream DNS servers for direct resolution in TUN mode (see `GenOptions::direct_dns`).
+/// systemd-resolved lists its real upstreams in its own resolv.conf; without resolved,
+/// /etc/resolv.conf already holds them. Empty when only a local stub is configured.
+pub fn upstream_dns() -> Vec<String> {
+    ["/run/systemd/resolve/resolv.conf", "/etc/resolv.conf"]
+        .iter()
+        .filter_map(|p| fs::read_to_string(p).ok())
+        .map(|text| ttcm_core::config::upstream_nameservers(&text))
+        .find(|servers| !servers.is_empty())
+        .unwrap_or_default()
+}
+
 fn is_root() -> bool {
     unsafe { libc::geteuid() == 0 }
 }

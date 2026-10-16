@@ -195,6 +195,21 @@ impl CoreState {
         } else {
             (bin, work_dir)
         };
+        // Linux TUN: the core resolves direct domains itself, never through
+        // systemd-resolved — resolved's DNS is the tun, which would loop the query back.
+        #[cfg(target_os = "linux")]
+        let direct_dns = if tun { crate::platform::linux::upstream_dns() } else { Vec::new() };
+        #[cfg(not(target_os = "linux"))]
+        let direct_dns: Vec<String> = Vec::new();
+        if tun && cfg!(target_os = "linux") {
+            match direct_dns.first() {
+                Some(s) => app_log(app, format!("DNS для прямых сайтов: {s}")),
+                None => app_error(
+                    app,
+                    "Не найден DNS-сервер сети (в resolv.conf только локальная заглушка) — прямые сайты резолвятся через системный резолвер, в TUN это может не работать.".to_string(),
+                ),
+            }
+        }
 
         ensure_port_free(CLASH_CONTROLLER, "Clash API")?;
         ensure_port_free(&format!("{MIXED_LISTEN}:{port}"), "локальный прокси")?;
@@ -215,9 +230,9 @@ impl CoreState {
             dns_doh: settings.dns_doh,
             block_quic: settings.block_quic,
             tun,
+            direct_dns: direct_dns.clone(),
             // `info` logs every connection — real CPU cost in TUN mode.
             log_level: if settings.verbose_logs { "info".into() } else { "warn".into() },
-            ..GenOptions::default()
         };
         let write_cfg = |opts: &GenOptions| -> Result<(), String> {
             fs::write(&cfg_path, config::to_string(&config::generate(opts)))

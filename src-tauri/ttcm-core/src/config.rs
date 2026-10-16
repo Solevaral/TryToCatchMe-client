@@ -10,6 +10,8 @@ pub const CLASH_CONTROLLER: &str = "127.0.0.1:9090";
 pub const MIXED_LISTEN: &str = "127.0.0.1";
 /// Default local proxy port (user-configurable in Settings).
 pub const MIXED_PORT: u16 = 2080;
+/// TUN interface name on Linux (firewall rules are bound to it).
+pub const TUN_IFACE_LINUX: &str = "ttcm0";
 
 /// Port of the internal inbound the app uses to download geo lists THROUGH the
 /// proxy: always the proxy port + 1.
@@ -160,20 +162,24 @@ pub fn generate(opts: &GenOptions) -> Value {
         }));
     }
     if opts.tun {
-        inbounds.insert(
-            0,
-            json!({
-                "type": "tun",
-                "tag": "tun-in",
-                "address": ["172.18.0.1/30", "fdfe:dcba:9876::1/126"],
-                "auto_route": true,
-                // strict_route stays off: the app stops the core with a hard kill, and
-                // strict rules could leave the machine without internet after an
-                // unclean exit. Wintun + its routes are removed when the process dies.
-                "strict_route": false,
-                "stack": "mixed"
-            }),
-        );
+        let mut tun = json!({
+            "type": "tun",
+            "tag": "tun-in",
+            "address": ["172.18.0.1/30", "fdfe:dcba:9876::1/126"],
+            "auto_route": true,
+            // strict_route stays off: the app stops the core with a hard kill, and
+            // strict rules could leave the machine without internet after an
+            // unclean exit. Wintun + its routes are removed when the process dies.
+            "strict_route": false,
+            "stack": "mixed"
+        });
+        if cfg!(target_os = "linux") {
+            // Fixed name: the one-time setup allows it in ufw / firewalld (the "mixed"
+            // stack hands TCP back through the tun as inbound packets). Keep in sync
+            // with platform::linux::IFACE.
+            tun["interface_name"] = json!(TUN_IFACE_LINUX);
+        }
+        inbounds.insert(0, tun);
     }
 
     let cfg_base = json!({
@@ -326,6 +332,17 @@ mod tests {
         assert_eq!(cfg["inbounds"][0]["type"], "tun");
         // sing-box must never own the system proxy (a hard kill would leave it behind).
         assert!(cfg["inbounds"].as_array().unwrap().iter().all(|i| i.get("set_system_proxy").is_none()));
+    }
+
+    #[test]
+    fn tun_interface_name_is_fixed_on_linux_only() {
+        let cfg = generate(&GenOptions { tun: true, ..only_youtube() });
+        let name = cfg["inbounds"][0].get("interface_name");
+        if cfg!(target_os = "linux") {
+            assert_eq!(name.and_then(|v| v.as_str()), Some("ttcm0"));
+        } else {
+            assert!(name.is_none());
+        }
     }
 
     #[test]

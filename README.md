@@ -53,7 +53,9 @@ installer and a Linux AppImage.
 - **TUN** — captures all traffic, including apps that ignore the proxy. Windows needs
   admin rights (the app offers to relaunch elevated); on Linux the app stays a normal
   user process and asks for the password once, on the first TUN connect, to install
-  the core into `/opt/trytocatchme` with network capabilities. The system proxy is pointed at the app
+  the core into `/opt/trytocatchme` with network capabilities, allow it to set the
+  tunnel's DNS in systemd-resolved (a polkit rule for your user) and allow inbound
+  traffic on the `ttcm0` interface in ufw / firewalld. The system proxy is pointed at the app
   in TUN mode too, so apps that read it (Electron apps, browsers) can't be sent past
   the tunnel by a proxy another client left behind.
 - Copy-ready `HTTP_PROXY` / `HTTPS_PROXY` commands for PowerShell, cmd and bash/zsh,
@@ -157,6 +159,18 @@ npm run tauri build
 ```
 
 Installers/binaries are written to `src-tauri/target/release/bundle/`.
+
+## Removing the Linux TUN setup
+
+Deleting the AppImage leaves the one-time TUN setup behind. To remove it:
+
+```bash
+sudo rm -rf /opt/trytocatchme /etc/polkit-1/rules.d/49-trytocatchme.rules
+sudo ufw delete allow in on ttcm0
+sudo firewall-cmd --permanent --zone=trusted --remove-interface=ttcm0 && sudo firewall-cmd --reload
+```
+
+(Skip the `ufw` / `firewall-cmd` line if that firewall isn't installed.)
 
 ## Releases
 

@@ -127,6 +127,7 @@ pub fn run() {
             commands::sysproxy_reapply,
             commands::settings_get,
             commands::settings_set,
+            commands::network_interfaces,
             commands::is_admin,
             commands::relaunch_admin,
             commands::diag_run,

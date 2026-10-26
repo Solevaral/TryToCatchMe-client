@@ -304,13 +304,25 @@ pub fn settings_get(store: State<'_, SettingsStore>) -> Settings {
 }
 
 #[tauri::command]
-pub fn settings_set(app: AppHandle, store: State<'_, SettingsStore>, settings: Settings) -> Result<(), String> {
+pub fn settings_set(app: AppHandle, store: State<'_, SettingsStore>, mut settings: Settings) -> Result<(), String> {
     // The geo-download inbound uses port + 1, so the top port is reserved.
     if !(1024..=65534).contains(&settings.proxy_port) {
         return Err("Порт прокси должен быть от 1024 до 65534".into());
     }
+    settings.direct_interface = settings
+        .direct_interface
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
     store.set(&app, settings);
     Ok(())
+}
+
+/// Names of the system's network interfaces (for the direct-traffic interface choice).
+#[tauri::command]
+pub async fn network_interfaces() -> Vec<String> {
+    tauri::async_runtime::spawn_blocking(crate::platform::network_interfaces)
+        .await
+        .unwrap_or_default()
 }
 
 /// Whether the app currently runs with administrator rights (needed for TUN).

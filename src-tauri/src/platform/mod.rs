@@ -31,6 +31,38 @@ pub fn relaunch_elevated() -> Result<(), String> {
     Ok(())
 }
 
+/// Names of the active network interfaces, as sing-box's `bind_interface` expects them
+/// (Windows: adapter names like `Ethernet`, `Wi-Fi`, a WireGuard tunnel's name).
+/// Loopback and our own TUN adapter are left out. Sorted, no duplicates.
+pub fn network_interfaces() -> Vec<String> {
+    let mut names: Vec<String> = interface_names()
+        .into_iter()
+        .map(|n| n.trim().to_string())
+        .filter(|n| !n.is_empty() && n != "lo" && n != ttcm_core::config::TUN_IFACE_LINUX)
+        .collect();
+    names.sort_by_key(|n| n.to_lowercase());
+    names.dedup();
+    names
+}
+
+#[cfg(windows)]
+fn interface_names() -> Vec<String> {
+    use std::os::windows::process::CommandExt;
+    // UTF-8 output: adapter names may be localized (e.g. «Беспроводная сеть»).
+    const QUERY: &str = "[Console]::OutputEncoding = [Text.Encoding]::UTF8; Get-NetAdapter -ErrorAction SilentlyContinue | Where-Object Status -eq 'Up' | ForEach-Object Name";
+    let mut ps = std::process::Command::new("powershell");
+    ps.args(["-NoProfile", "-NonInteractive", "-Command", QUERY]);
+    ps.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    let Ok(out) = ps.output() else { return Vec::new() };
+    String::from_utf8_lossy(&out.stdout).lines().map(str::to_string).collect()
+}
+
+#[cfg(not(windows))]
+fn interface_names() -> Vec<String> {
+    let Ok(dir) = std::fs::read_dir("/sys/class/net") else { return Vec::new() };
+    dir.filter_map(|e| e.ok()).map(|e| e.file_name().to_string_lossy().into_owned()).collect()
+}
+
 /// Other VPN/proxy clients that are running right now (display names). They compete for
 /// the system proxy and routes, so traffic may silently go through them instead of us.
 pub fn running_vpn_clients() -> Vec<String> {

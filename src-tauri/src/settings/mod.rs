@@ -41,6 +41,10 @@ pub struct Settings {
     /// default and only the core's warnings and errors are streamed.
     #[serde(default)]
     pub verbose_logs: bool,
+    /// Network interface for direct traffic (sing-box `bind_interface` on the `direct`
+    /// outbound), e.g. another VPN's full-tunnel adapter. `None` => automatic, as before.
+    #[serde(default)]
+    pub direct_interface: Option<String>,
 }
 
 impl Default for Settings {
@@ -53,6 +57,7 @@ impl Default for Settings {
             capture_tun: false,
             proxy_port: default_proxy_port(),
             verbose_logs: false,
+            direct_interface: None,
         }
     }
 }

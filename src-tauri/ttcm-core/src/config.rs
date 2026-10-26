@@ -59,6 +59,12 @@ pub struct GenOptions {
     /// core accepts the connection and can't dial it out — a TLS error instead of the
     /// IPv4 fallback.
     pub tun_ipv6: bool,
+    /// Network interface the `direct` outbound is bound to (`bind_interface`), e.g. the
+    /// adapter of another full-tunnel VPN (WireGuard), so direct traffic goes through it
+    /// instead of the physical uplink `auto_detect_interface` picks. The `proxy`
+    /// outbound is left alone: the server is still reached over the uplink.
+    /// `None` => no binding, the config is exactly as without this option.
+    pub direct_interface: Option<String>,
 }
 
 impl Default for GenOptions {
@@ -76,6 +82,7 @@ impl Default for GenOptions {
             tun: false,
             direct_dns: Vec::new(),
             tun_ipv6: true,
+            direct_interface: None,
         }
     }
 }
@@ -142,7 +149,11 @@ pub fn generate(opts: &GenOptions) -> Value {
     // `direct` goes first so any of sing-box's own traffic without an explicit detour
     // doesn't silently depend on the proxy. User traffic is steered explicitly by
     // `route.rules` / `route.final`; geo lists set their own detour.
-    let mut outbounds = vec![json!({ "type": "direct", "tag": "direct" })];
+    let mut direct = json!({ "type": "direct", "tag": "direct" });
+    if let Some(iface) = &opts.direct_interface {
+        direct["bind_interface"] = json!(iface);
+    }
+    let mut outbounds = vec![direct];
     if let Some(proxy) = &opts.proxy_outbound {
         outbounds.push(proxy.clone());
         outbounds.extend(opts.extra_outbounds.iter().cloned());
@@ -529,6 +540,28 @@ mod tests {
         assert_eq!(cfg["route"]["final"], "direct");
         assert_eq!(cfg["outbounds"].as_array().unwrap().len(), 1);
         assert_eq!(cfg["dns"]["final"], "dns-direct");
+    }
+
+    #[test]
+    fn direct_is_unbound_by_default() {
+        let cfg = generate(&only_youtube());
+        assert_eq!(cfg["outbounds"][0], json!({ "type": "direct", "tag": "direct" }));
+        assert_eq!(cfg["route"]["auto_detect_interface"], true);
+    }
+
+    #[test]
+    fn direct_interface_binds_only_direct() {
+        let base = generate(&only_youtube());
+        let cfg = generate(&GenOptions { direct_interface: Some("all-rodoro-home".into()), ..only_youtube() });
+        assert_eq!(
+            cfg["outbounds"][0],
+            json!({ "type": "direct", "tag": "direct", "bind_interface": "all-rodoro-home" })
+        );
+        assert_eq!(cfg["outbounds"][1], proxy());
+        // Everything else (proxy outbound, auto_detect_interface, DNS, rules) is unchanged.
+        let mut expected = base;
+        expected["outbounds"][0]["bind_interface"] = json!("all-rodoro-home");
+        assert_eq!(cfg, expected);
     }
 }
 

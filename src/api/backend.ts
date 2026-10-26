@@ -47,6 +47,13 @@ export interface Settings {
   proxy_port: number;
   /** Stream every connection from the core into the log console (heavy). */
   verbose_logs: boolean;
+  /** Network interface for direct traffic (e.g. another VPN's tunnel); null = automatic. */
+  direct_interface: string | null;
+}
+
+/** Names of the system's active network interfaces. */
+export async function networkInterfaces(): Promise<string[]> {
+  return await invoke<string[]>("network_interfaces");
 }
 
 export async function isAdmin(): Promise<boolean> {

@@ -219,6 +219,21 @@ impl CoreState {
         if tun && !tun_ipv6 {
             app_log(app, "IPv6 у сети нет — TUN только IPv4".to_string());
         }
+        // Direct traffic through a chosen interface (e.g. another VPN's full tunnel).
+        // An interface that isn't up right now falls back to automatic: binding to a
+        // missing interface would break all direct traffic.
+        let direct_interface = settings.direct_interface.clone().filter(|iface| {
+            if crate::platform::network_interfaces().iter().any(|n| n == iface) {
+                app_log(app, format!("Прямой трафик через интерфейс: {iface}"));
+                true
+            } else {
+                app_error(
+                    app,
+                    format!("Интерфейс «{iface}» для прямого трафика не найден — прямой трафик пойдёт как обычно (Авто)"),
+                );
+                false
+            }
+        });
 
         ensure_port_free(CLASH_CONTROLLER, "Clash API")?;
         ensure_port_free(&format!("{MIXED_LISTEN}:{port}"), "локальный прокси")?;
@@ -241,6 +256,7 @@ impl CoreState {
             tun,
             direct_dns: direct_dns.clone(),
             tun_ipv6,
+            direct_interface: direct_interface.clone(),
             // `info` logs every connection — real CPU cost in TUN mode.
             log_level: if settings.verbose_logs { "info".into() } else { "warn".into() },
         };

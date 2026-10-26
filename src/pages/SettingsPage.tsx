@@ -4,6 +4,7 @@ import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import {
   getVersion,
   isHosted,
+  networkInterfaces,
   settingsGet,
   settingsSet,
   type Settings,
@@ -14,12 +15,19 @@ export default function SettingsPage() {
   const [autostart, setAutostart] = useState<boolean | null>(null);
   const [hosted, setHosted] = useState(false);
   const [settings, setSettings] = useState<Settings | null>(null);
+  const [ifaces, setIfaces] = useState<string[] | null>(null);
+
+  function loadIfaces() {
+    setIfaces(null);
+    networkInterfaces().then(setIfaces).catch(() => setIfaces([]));
+  }
 
   useEffect(() => {
     getVersion().then(setVersion).catch(() => setVersion("н/д"));
     isEnabled().then(setAutostart).catch(() => setAutostart(null));
     isHosted().then(setHosted).catch(() => setHosted(false));
     settingsGet().then(setSettings).catch(() => setSettings(null));
+    loadIfaces();
   }, []);
 
   async function toggleAutostart() {
@@ -150,6 +158,49 @@ export default function SettingsPage() {
               <button className="btn" onClick={() => copyEnv("ps")}>{copied === "ps" ? "Скопировано ✓" : "PowerShell"}</button>
               <button className="btn" onClick={() => copyEnv("cmd")}>{copied === "cmd" ? "Скопировано ✓" : "cmd"}</button>
               <button className="btn" onClick={() => copyEnv("sh")}>{copied === "sh" ? "Скопировано ✓" : "bash / zsh"}</button>
+            </div>
+          </>
+        ) : (
+          <div className="muted">Загрузка…</div>
+        )}
+      </div>
+
+      <div className="card" style={{ marginBottom: 18 }}>
+        <div style={{ fontWeight: 600, marginBottom: 10 }}>Прямой трафик через интерфейс</div>
+        {settings ? (
+          <>
+            <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+              <select
+                value={settings.direct_interface ?? ""}
+                onChange={(e) => patch({ direct_interface: e.target.value || null })}
+                style={{
+                  minWidth: 220,
+                  background: "var(--bg-2)",
+                  border: "1px solid var(--border)",
+                  borderRadius: 8,
+                  color: "var(--text-0)",
+                  padding: "6px 8px",
+                }}
+              >
+                <option value="">Авто (по умолчанию)</option>
+                {settings.direct_interface && !ifaces?.includes(settings.direct_interface) && (
+                  <option value={settings.direct_interface}>
+                    {settings.direct_interface}
+                    {ifaces ? " (сейчас нет в системе)" : ""}
+                  </option>
+                )}
+                {(ifaces ?? []).map((name) => (
+                  <option key={name} value={name}>{name}</option>
+                ))}
+              </select>
+              <button className="btn" onClick={loadIfaces} disabled={ifaces === null}>
+                {ifaces === null ? "Загрузка…" : "Обновить список"}
+              </button>
+            </div>
+            <div className="muted" style={{ fontSize: 12, marginTop: 8 }}>
+              Нужен, чтобы прямой трафик шёл через другой VPN (например, полный туннель
+              WireGuard). Трафик через VPN-сервер это не затрагивает. Если выбранного
+              интерфейса при подключении нет, прямой трафик пойдёт как в режиме «Авто».
             </div>
           </>
         ) : (

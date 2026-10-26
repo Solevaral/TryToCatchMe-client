@@ -569,6 +569,15 @@ pub fn generate(opts: &GenOptions) -> Value {
         "dns-direct"
     };
     cfg["dns"] = json!({ "servers": servers, "rules": dns_rules, "final": dns_final });
+    // Direct traffic through a tunnel without an IPv6 address: an AAAA answer would send
+    // the connection into the tunnel over IPv6, which it can't carry ("missing IPv6
+    // local address") — dual-stack sites (Cloudflare & co.) just failed. A records only.
+    let wg_has_ipv6 = wg.is_some_and(|ep| {
+        ep["address"].as_array().is_some_and(|a| a.iter().any(|x| x.as_str().is_some_and(|s| s.contains(':'))))
+    });
+    if direct_via_wg && !wg_has_ipv6 {
+        cfg["dns"]["strategy"] = json!("ipv4_only");
+    }
 
     cfg
 }
@@ -1087,6 +1096,23 @@ Ethernet|not-an-ip|x"));
         let cfg = generate(&opts);
         assert!(cfg["dns"]["servers"].as_array().unwrap().iter().all(|s| s["tag"] != "dns-wg"));
         assert_eq!(cfg["dns"]["final"], "dns-direct");
+    }
+
+    #[test]
+    fn ipv4_only_dns_when_direct_goes_into_a_v4_only_tunnel() {
+        // wg_tunnel() has only 10.6.0.3/32: AAAA answers would die in it.
+        let cfg = generate(&with_wg(true, false));
+        assert_eq!(cfg["dns"]["strategy"], "ipv4_only");
+        // Direct traffic through the ISP: nothing goes into the tunnel by default.
+        let cfg = generate(&with_wg(false, true));
+        assert!(cfg["dns"].get("strategy").is_none());
+        // A tunnel with an IPv6 address carries IPv6: no restriction.
+        let mut t = wg_tunnel();
+        t.interface.addresses.push("fd00::3/128".into());
+        let cfg = generate(&GenOptions { wg: Some(crate::wireguard::endpoint(&t, "wg", true)), ..with_wg(true, false) });
+        assert!(cfg["dns"].get("strategy").is_none());
+        // No tunnel: unchanged.
+        assert!(generate(&pinned())["dns"].get("strategy").is_none());
     }
 
     #[test]

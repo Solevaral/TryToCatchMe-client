@@ -10,3 +10,4 @@ pub mod pac;
 pub mod routing;
 pub mod subscription;
 pub mod sysproxy;
+pub mod wireguard;

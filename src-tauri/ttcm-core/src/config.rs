@@ -77,6 +77,53 @@ pub struct GenOptions {
     /// Same for these destinations (CIDRs, e.g. the other VPN's server): also excluded
     /// from the TUN routes. Ignored outside TUN + `direct_interface`.
     pub tun_bypass_cidrs: Vec<String>,
+    /// Built-in WireGuard: the active tunnel's sing-box endpoint (tag `wg`, see
+    /// `wireguard::endpoint`). When set, the external-interface options above are
+    /// ignored — the built-in tunnel replaces them.
+    pub wg: Option<Value>,
+    /// The tunnel's DNS servers (IPs): direct domains resolve through them when direct
+    /// traffic goes through the tunnel.
+    pub wg_dns: Vec<String>,
+    /// Direct traffic (rules/final `direct`) goes through the tunnel; LAN stays local.
+    pub direct_via_wg: bool,
+    /// The proxy outbounds dial the VPN server through the tunnel (`detour`).
+    pub proxy_via_wg: bool,
+    /// "Through the ISP": domains (and their subdomains) / IPs / CIDRs that go straight
+    /// out of the physical uplink — past the tunnel and past the VPN.
+    pub provider_list: Vec<String>,
+}
+
+/// A "through the ISP" entry: an IP/CIDR, or a domain (also pasted as a URL or
+/// `*.domain`). `None` for garbage.
+pub enum ProviderEntry {
+    Cidr(String),
+    Domain(String),
+}
+
+pub fn provider_entry(entry: &str) -> Option<ProviderEntry> {
+    let e = entry.trim();
+    if let Some(c) = bypass_cidr(e) {
+        return Some(ProviderEntry::Cidr(c));
+    }
+    let e = e.strip_prefix("https://").or_else(|| e.strip_prefix("http://")).unwrap_or(e);
+    let host = e.split(['/', '?', '#']).next().unwrap_or("");
+    let host = host.trim_start_matches("*.").trim_start_matches('.').trim_end_matches('.').to_lowercase();
+    let valid = host.contains('.')
+        && host.split('.').all(|l| !l.is_empty() && l.chars().all(|c| c.is_alphanumeric() || c == '-'));
+    valid.then_some(ProviderEntry::Domain(host))
+}
+
+/// The "through the ISP" list split into (domain suffixes, CIDRs); garbage is dropped.
+pub fn split_provider_list(list: &[String]) -> (Vec<String>, Vec<String>) {
+    let (mut domains, mut cidrs) = (Vec::new(), Vec::new());
+    for e in list {
+        match provider_entry(e) {
+            Some(ProviderEntry::Domain(d)) if !domains.contains(&d) => domains.push(d),
+            Some(ProviderEntry::Cidr(c)) if !cidrs.contains(&c) => cidrs.push(c),
+            _ => {}
+        }
+    }
+    (domains, cidrs)
 }
 
 /// An IP or CIDR from the bypass list as a CIDR (`1.2.3.4` → `1.2.3.4/32`); `None`
@@ -112,6 +159,11 @@ impl Default for GenOptions {
             proxy_via_direct_interface: false,
             tun_bypass_processes: Vec::new(),
             tun_bypass_cidrs: Vec::new(),
+            wg: None,
+            wg_dns: Vec::new(),
+            direct_via_wg: false,
+            proxy_via_wg: false,
+            provider_list: Vec::new(),
         }
     }
 }
@@ -174,21 +226,32 @@ const DOMAIN_KEYS: [&str; 3] = ["domain", "domain_suffix", "domain_keyword"];
 
 pub fn generate(opts: &GenOptions) -> Value {
     let has_proxy = opts.proxy_outbound.is_some();
+    let wg = opts.wg.as_ref();
+    // The built-in tunnel replaces the external-interface options.
+    let legacy_iface = if wg.is_some() { None } else { opts.direct_interface.as_ref() };
+    let direct_via_wg = wg.is_some() && opts.direct_via_wg;
+    let wg_tag = crate::wireguard::WG_TAG;
 
     // `direct` goes first so any of sing-box's own traffic without an explicit detour
     // doesn't silently depend on the proxy. User traffic is steered explicitly by
     // `route.rules` / `route.final`; geo lists set their own detour.
     let mut direct = json!({ "type": "direct", "tag": "direct" });
-    if let Some(iface) = &opts.direct_interface {
+    if let Some(iface) = legacy_iface {
         direct["bind_interface"] = json!(iface);
     }
     let mut outbounds = vec![direct];
     if let Some(proxy) = &opts.proxy_outbound {
         outbounds.push(proxy.clone());
         outbounds.extend(opts.extra_outbounds.iter().cloned());
-        if let (Some(iface), true) = (&opts.direct_interface, opts.proxy_via_direct_interface) {
+        if let (Some(iface), true) = (legacy_iface, opts.proxy_via_direct_interface) {
             for o in &mut outbounds[1..] {
                 o["bind_interface"] = json!(iface);
+            }
+        }
+        // VPN over the tunnel: the VPN server is dialed through it.
+        if wg.is_some() && opts.proxy_via_wg {
+            for o in &mut outbounds[1..] {
+                o["detour"] = json!(wg_tag);
             }
         }
     }
@@ -226,6 +289,25 @@ pub fn generate(opts: &GenOptions) -> Value {
     } else {
         (Vec::new(), Vec::new(), "direct".to_string())
     };
+    // Direct traffic through the tunnel: `direct` targets become the tunnel, except the
+    // routing layer's LAN rule (a home network must stay reachable).
+    let (user_rules, final_tag) = if direct_via_wg {
+        let rules = user_rules
+            .into_iter()
+            .map(|mut r| {
+                if r["outbound"] == "direct" && r.get("ip_is_private").is_none() {
+                    r["outbound"] = json!(wg_tag);
+                }
+                r
+            })
+            .collect();
+        let fin = if final_tag == "direct" { wg_tag.to_string() } else { final_tag };
+        (rules, fin)
+    } else {
+        (user_rules, final_tag)
+    };
+    let (provider_domains, provider_cidrs) = split_provider_list(&opts.provider_list);
+    let has_provider = !provider_domains.is_empty() || !provider_cidrs.is_empty();
 
     // Rule order matters:
     // 1. sniff — recover the domain (TLS SNI / HTTP Host / QUIC) from raw
@@ -238,10 +320,14 @@ pub fn generate(opts: &GenOptions) -> Value {
     //    through `direct` they'd loop back into its tunnel. First, before anything
     //    else can claim them.
     let mut rules = Vec::new();
-    let bypass = opts.tun && opts.direct_interface.is_some();
-    if bypass {
-        // An unbound direct: auto_detect_interface puts it on the physical uplink.
+    let bypass = opts.tun && legacy_iface.is_some();
+    // An unbound direct (auto_detect_interface puts it on the physical uplink), needed
+    // whenever `direct` itself is bound to another VPN's adapter.
+    let physical = bypass || (has_provider && legacy_iface.is_some());
+    if physical {
         outbounds.push(json!({ "type": "direct", "tag": "direct-physical" }));
+    }
+    if bypass {
         if !opts.tun_bypass_processes.is_empty() {
             rules.push(json!({ "process_name": opts.tun_bypass_processes, "outbound": "direct-physical" }));
         }
@@ -260,6 +346,19 @@ pub fn generate(opts: &GenOptions) -> Value {
     }
     if has_proxy && opts.block_quic {
         rules.push(json!({ "network": "udp", "port": 443, "action": "reject" }));
+    }
+    // 4. Direct through the tunnel: the LAN stays local whatever the routing layer says.
+    if direct_via_wg {
+        rules.push(json!({ "ip_is_private": true, "outbound": "direct" }));
+    }
+    // 5. "Through the ISP": straight out of the physical uplink, before any service or
+    //    list could send these sites into the VPN or the tunnel.
+    let provider_tag = if physical { "direct-physical" } else { "direct" };
+    if !provider_domains.is_empty() {
+        rules.push(json!({ "domain_suffix": provider_domains, "outbound": provider_tag }));
+    }
+    if !provider_cidrs.is_empty() {
+        rules.push(json!({ "ip_cidr": provider_cidrs, "outbound": provider_tag }));
     }
     rules.extend(user_rules.iter().map(to_action_rule));
 
@@ -329,6 +428,9 @@ pub fn generate(opts: &GenOptions) -> Value {
         }
     });
     let mut cfg = cfg_base;
+    if let Some(ep) = wg {
+        cfg["endpoints"] = json!([ep]);
+    }
 
     // DNS follows routing. `dns-direct` is the system resolver (works exactly like
     // without a VPN, never depends on the proxy). With DoH enabled, domains that are
@@ -347,6 +449,17 @@ pub fn generate(opts: &GenOptions) -> Value {
     };
     let mut servers = vec![dns_direct];
     let mut dns_rules = Vec::new();
+    // Direct through the tunnel: direct domains resolve with the tunnel's DNS (the ISP's
+    // resolver may lie about sites it blocks). Server domains (the tunnel's own endpoint
+    // included) still use `dns-direct` via default_domain_resolver — no chicken-and-egg.
+    let dns_wg = direct_via_wg && !opts.wg_dns.is_empty();
+    if dns_wg {
+        servers.push(json!({ "type": "udp", "tag": "dns-wg", "server": opts.wg_dns[0], "detour": wg_tag }));
+    }
+    let tunnel_dns = if dns_wg { "dns-wg" } else { "dns-direct" };
+    if (doh || dns_wg) && !provider_domains.is_empty() {
+        dns_rules.push(json!({ "domain_suffix": provider_domains, "server": "dns-direct" }));
+    }
     if doh {
         servers.push(json!({
             "type": "https", "tag": "doh-proxy", "server": "1.1.1.1", "detour": "proxy"
@@ -364,6 +477,7 @@ pub fn generate(opts: &GenOptions) -> Value {
                 // Direct rules still take their DNS slot in order, or a narrower direct
                 // service would resolve through a broader proxied one.
                 Some("direct") => "dns-direct".to_string(),
+                Some(t) if t == wg_tag => tunnel_dns.to_string(),
                 _ => continue,
             };
             let mut dns_rule = serde_json::Map::new();
@@ -391,6 +505,8 @@ pub fn generate(opts: &GenOptions) -> Value {
     }
     let dns_final = if doh && final_tag == "proxy" {
         "doh-proxy"
+    } else if final_tag == wg_tag {
+        tunnel_dns
     } else {
         "dns-direct"
     };
@@ -751,6 +867,207 @@ mod tests {
         assert_eq!(bypass_cidr("2001:db8::1").as_deref(), Some("2001:db8::1/128"));
         assert_eq!(bypass_cidr("1.2.3.4/33"), None);
         assert_eq!(bypass_cidr("home.example.com"), None);
+    }
+
+    // ---- built-in WireGuard ----
+
+    fn wg_tunnel() -> crate::wireguard::WgTunnel {
+        let conf = "[Interface]\nPrivateKey = yAnz5TF+lXXJte14tji3zlMNq+hd2rYUIgJBgB3fBmk=\nAddress = 10.6.0.3/32\nDNS = 10.6.0.1\n\
+                    [Peer]\nPublicKey = xTIBA5rboUvnH4htodjb6e697QjLERt1NAB4mZqp8Dg=\nAllowedIPs = 0.0.0.0/1, 128.0.0.0/1\nEndpoint = 46.138.253.10:51820\n";
+        let (interface, peers) = crate::wireguard::parse_conf(conf).unwrap();
+        crate::wireguard::WgTunnel { id: "t".into(), name: "home".into(), interface, peers }
+    }
+
+    /// Rule mode with services, a pinned profile, a direct list and LAN — plus the tunnel.
+    fn with_wg(direct: bool, vpn_over: bool) -> GenOptions {
+        let t = wg_tunnel();
+        GenOptions {
+            route_rules: vec![
+                json!({ "ip_is_private": true, "outbound": "direct" }),
+                json!({ "domain_suffix": ["chatgpt.com"], "outbound": "proxy" }),
+                json!({ "domain_suffix": ["ru"], "outbound": "direct" }),
+                json!({ "domain_suffix": ["blocked.example"], "outbound": "block" }),
+            ],
+            wg: Some(crate::wireguard::endpoint(&t, "wg")),
+            wg_dns: crate::wireguard::dns_servers(&t.interface),
+            direct_via_wg: direct,
+            proxy_via_wg: vpn_over,
+            ..pinned()
+        }
+    }
+
+    fn rules(cfg: &Value) -> &Vec<Value> {
+        cfg["route"]["rules"].as_array().unwrap()
+    }
+
+    #[test]
+    fn wg_endpoint_is_added_and_never_routed_into_itself() {
+        for (direct, vpn_over, tun) in [(false, false, false), (true, false, true), (true, true, true), (false, true, false)] {
+            let cfg = generate(&GenOptions { tun, ..with_wg(direct, vpn_over) });
+            let eps = cfg["endpoints"].as_array().unwrap();
+            assert_eq!(eps.len(), 1);
+            assert_eq!(eps[0]["tag"], "wg");
+            // The endpoint dials its server itself on the uplink: no detour or binding,
+            // and no rule anywhere sends traffic for its server into the tunnel.
+            assert!(eps[0].get("detour").is_none() && eps[0].get("bind_interface").is_none());
+            assert!(!to_string(&cfg["route"]).contains("46.138.253.10"));
+            assert_eq!(cfg["route"]["default_domain_resolver"]["server"], "dns-direct");
+            assert_eq!(cfg["route"]["auto_detect_interface"], true);
+            // The plain direct outbound is never bound or detoured.
+            assert_eq!(cfg["outbounds"][0], json!({ "type": "direct", "tag": "direct" }));
+        }
+    }
+
+    #[test]
+    fn wg_connected_but_unused_changes_only_endpoints() {
+        let cfg = generate(&with_wg(false, false));
+        let mut plain = generate(&GenOptions { wg: None, wg_dns: Vec::new(), ..with_wg(false, false) });
+        plain["endpoints"] = cfg["endpoints"].clone();
+        assert_eq!(cfg, plain);
+    }
+
+    #[test]
+    fn direct_via_wg_moves_direct_traffic_into_the_tunnel() {
+        let cfg = generate(&with_wg(true, false));
+        assert_eq!(cfg["route"]["final"], "wg");
+        let r = rules(&cfg);
+        // LAN pinned to the real direct before everything else from routing.
+        let lan = r.iter().position(|x| x == &json!({ "ip_is_private": true, "outbound": "direct" })).unwrap();
+        let ru = r.iter().position(|x| x["domain_suffix"] == json!(["ru"])).unwrap();
+        assert!(lan < ru);
+        assert_eq!(r[ru]["outbound"], "wg");
+        // VPN services and blocks are untouched.
+        assert!(r.iter().any(|x| x["domain_suffix"] == json!(["chatgpt.com"]) && x["outbound"] == "proxy"));
+        assert!(r.iter().any(|x| x["domain_suffix"] == json!(["blocked.example"]) && x["action"] == "reject"));
+        assert!(r.iter().all(|x| x["outbound"] != "direct" || x.get("ip_is_private").is_some()));
+        // Proxy outbounds are not detoured in this mode.
+        assert!(cfg["outbounds"].as_array().unwrap().iter().all(|o| o.get("detour").is_none()));
+    }
+
+    #[test]
+    fn direct_via_wg_resolves_direct_domains_with_the_tunnel_dns() {
+        let cfg = generate(&with_wg(true, false));
+        let servers = cfg["dns"]["servers"].as_array().unwrap();
+        assert!(servers.contains(&json!({ "type": "udp", "tag": "dns-wg", "server": "10.6.0.1", "detour": "wg" })));
+        assert_eq!(cfg["dns"]["final"], "dns-wg");
+        let dns_rules = cfg["dns"]["rules"].as_array().unwrap();
+        assert!(dns_rules.contains(&json!({ "domain_suffix": ["ru"], "server": "dns-wg" })));
+        assert!(dns_rules.contains(&json!({ "domain_suffix": ["chatgpt.com"], "server": "doh-proxy" })));
+        // A tunnel without DNS: direct domains keep the system resolver.
+        let mut opts = with_wg(true, false);
+        opts.wg_dns.clear();
+        let cfg = generate(&opts);
+        assert!(cfg["dns"]["servers"].as_array().unwrap().iter().all(|s| s["tag"] != "dns-wg"));
+        assert_eq!(cfg["dns"]["final"], "dns-direct");
+    }
+
+    #[test]
+    fn vpn_over_wg_detours_every_proxy_outbound() {
+        let cfg = generate(&with_wg(false, true));
+        let outbounds = cfg["outbounds"].as_array().unwrap();
+        assert_eq!(outbounds[1]["tag"], "proxy");
+        assert_eq!(outbounds[1]["detour"], "wg");
+        assert_eq!(outbounds[2]["tag"], "via-p2");
+        assert_eq!(outbounds[2]["detour"], "wg");
+        assert!(outbounds[0].get("detour").is_none());
+        // Routing itself is the plain one: direct stays direct.
+        assert_eq!(cfg["route"]["final"], "direct");
+        let plain = generate(&GenOptions { proxy_via_wg: false, ..with_wg(false, true) });
+        assert_eq!(cfg["route"], plain["route"]);
+        assert_eq!(cfg["dns"], plain["dns"]);
+    }
+
+    #[test]
+    fn both_modes_together_with_tun_and_global() {
+        let cfg = generate(&GenOptions { tun: true, final_action: "proxy".into(), ..with_wg(true, true) });
+        assert_eq!(cfg["route"]["final"], "proxy");
+        assert_eq!(cfg["outbounds"][1]["detour"], "wg");
+        assert_eq!(cfg["inbounds"][0]["type"], "tun");
+        assert_eq!(rules(&cfg)[1]["action"], "hijack-dns");
+        assert_eq!(cfg["dns"]["final"], "doh-proxy");
+        // Without a profile: everything direct goes through the tunnel.
+        let cfg = generate(&GenOptions {
+            proxy_outbound: None,
+            extra_outbounds: Vec::new(),
+            tun: true,
+            ..with_wg(true, true)
+        });
+        assert_eq!(cfg["route"]["final"], "wg");
+        assert_eq!(cfg["outbounds"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn built_in_tunnel_overrides_the_external_interface_options() {
+        let opts = GenOptions {
+            direct_interface: Some("all-rodoro-home".into()),
+            proxy_via_direct_interface: true,
+            tun: true,
+            tun_bypass_processes: vec!["wireguard.exe".into()],
+            tun_bypass_cidrs: vec!["46.138.253.10/32".into()],
+            ..with_wg(true, false)
+        };
+        let s = to_string(&generate(&opts));
+        assert!(!s.contains("bind_interface") && !s.contains("process_name") && !s.contains("direct-physical"));
+        assert!(!s.contains("route_exclude_address"));
+    }
+
+    #[test]
+    fn provider_list_goes_straight_out_by_domain_and_ip() {
+        let opts = GenOptions {
+            provider_list: vec![
+                "Warframe.com".into(),
+                "https://github.com/user/repo".into(),
+                "*.wikipedia.org".into(),
+                "1.2.3.4".into(),
+                "10.0.0.0/8".into(),
+                "not a domain".into(),
+                "warframe.com".into(),
+            ],
+            ..with_wg(true, true)
+        };
+        let cfg = generate(&opts);
+        let r = rules(&cfg);
+        let d = r.iter().position(|x| x["domain_suffix"] == json!(["warframe.com", "github.com", "wikipedia.org"])).unwrap();
+        assert_eq!(r[d]["outbound"], "direct");
+        assert_eq!(r[d + 1], json!({ "ip_cidr": ["1.2.3.4/32", "10.0.0.0/8"], "outbound": "direct" }));
+        // Before every routing-layer rule (services / lists), after sniff.
+        let first_service = r.iter().position(|x| x["domain_suffix"] == json!(["chatgpt.com"])).unwrap();
+        assert!(d < first_service && r[0]["action"] == "sniff");
+        // Their DNS goes to the ISP's resolver too.
+        assert_eq!(cfg["dns"]["rules"][0], json!({ "domain_suffix": ["warframe.com", "github.com", "wikipedia.org"], "server": "dns-direct" }));
+    }
+
+    #[test]
+    fn provider_list_with_the_external_interface_uses_the_unbound_direct() {
+        let opts = GenOptions {
+            direct_interface: Some("wg0".into()),
+            provider_list: vec!["github.com".into()],
+            ..pinned()
+        };
+        let cfg = generate(&opts);
+        assert!(cfg["outbounds"].as_array().unwrap().iter().any(|o| o == &json!({ "type": "direct", "tag": "direct-physical" })));
+        assert!(rules(&cfg).iter().any(|x| x == &json!({ "domain_suffix": ["github.com"], "outbound": "direct-physical" })));
+        // Without any tunnel or interface: plain direct.
+        let cfg = generate(&GenOptions { provider_list: vec!["github.com".into()], ..pinned() });
+        assert!(rules(&cfg).iter().any(|x| x == &json!({ "domain_suffix": ["github.com"], "outbound": "direct" })));
+        assert!(cfg["outbounds"].as_array().unwrap().iter().all(|o| o["tag"] != "direct-physical"));
+    }
+
+    #[test]
+    fn provider_entries_are_normalized() {
+        let parse = |e: &str| match provider_entry(e) {
+            Some(ProviderEntry::Domain(d)) => format!("d:{d}"),
+            Some(ProviderEntry::Cidr(c)) => format!("c:{c}"),
+            None => "-".into(),
+        };
+        assert_eq!(parse(" GitHub.com "), "d:github.com");
+        assert_eq!(parse("http://ru.wikipedia.org/wiki/X"), "d:ru.wikipedia.org");
+        assert_eq!(parse(".steampowered.com"), "d:steampowered.com");
+        assert_eq!(parse("пример.рф"), "d:пример.рф");
+        assert_eq!(parse("2001:db8::/32"), "c:2001:db8::/32");
+        assert_eq!(parse("localhost"), "-");
+        assert_eq!(parse("a..b"), "-");
+        assert_eq!(parse(""), "-");
     }
 
     #[test]

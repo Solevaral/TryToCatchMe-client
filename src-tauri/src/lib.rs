@@ -152,6 +152,7 @@ pub fn run() {
             wireguard::wg_export,
             wireguard::wg_remove,
             wireguard::wg_set_active,
+            wireguard::wg_restart,
             wireguard::wg_status,
             wireguard::wg_check,
             wireguard::wg_migration_offer,

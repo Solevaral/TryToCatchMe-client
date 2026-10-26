@@ -11,6 +11,7 @@ import {
   wgMigrate,
   wgMigrationOffer,
   wgRemove,
+  wgRestart,
   wgSetActive,
   wgStatus,
   wgUpdate,
@@ -23,7 +24,7 @@ import {
   type WgTunnel,
 } from "../api/backend";
 import ListEditor, { fieldStyle } from "../components/ListEditor";
-import { errorText, useConnection } from "../hooks/useConnection";
+import { errorText } from "../hooks/useConnection";
 
 function bytes(n: number): string {
   if (n < 1024) return `${n} Б`;
@@ -35,7 +36,6 @@ function bytes(n: number): string {
 const endpointOf = (t: WgTunnel) => t.peers.find((p) => p.endpoint)?.endpoint ?? "—";
 
 export default function WireGuardPage() {
-  const { connected } = useConnection();
   const [busy, setBusy] = useState(false);
   const [store, setStore] = useState<WgStore | null>(null);
   const [settings, setSettings] = useState<Settings | null>(null);
@@ -86,7 +86,7 @@ export default function WireGuardPage() {
   async function patch(p: Partial<Settings>) {
     if (!settings) return;
     const next = { ...settings, ...p };
-    await run(() => settingsSet(next), "Сохранено — применится при следующем подключении (или «Перезапустить»)");
+    await run(() => settingsSet(next), store?.active ? "Сохранено — нажмите «Перезапустить WireGuard», чтобы применить" : "Сохранено — применится при подключении");
   }
 
   async function importText(text: string, name: string) {
@@ -104,11 +104,18 @@ export default function WireGuardPage() {
     if (f) await importText(await f.text(), f.name);
   }
 
-  // Connect / disconnect: the tunnel lives inside the core, so a change restarts it
-  // (or starts the client when it's off).
+  // Connect / disconnect, separately from the VPN (the backend starts, restarts or
+  // stops the core as needed).
   async function activate(id: string | null) {
     setBusy(true);
     await run(() => wgSetActive(id));
+    setBusy(false);
+  }
+
+  // Apply edited settings (tunnel, modes, "not through the tunnel") to the running tunnel.
+  async function restartTunnel() {
+    setBusy(true);
+    await run(wgRestart, "WireGuard перезапущен — настройки применены");
     setBusy(false);
   }
 
@@ -212,9 +219,14 @@ export default function WireGuardPage() {
                   </div>
                 </div>
                 {isActive ? (
-                  <button className="btn" disabled={busy} onClick={() => activate(null)}>
-                    Отключить
-                  </button>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                    <button className="btn primary" disabled={busy} onClick={restartTunnel} title="Применить изменённые настройки туннеля, режимов и списка «Не через туннель»">
+                      Перезапустить WireGuard
+                    </button>
+                    <button className="btn" disabled={busy} onClick={() => activate(null)}>
+                      Отключить
+                    </button>
+                  </div>
                 ) : (
                   <button className="btn" disabled={busy} onClick={() => activate(t.id)}>
                     Подключить
@@ -297,7 +309,7 @@ export default function WireGuardPage() {
           </>
         ) : active ? (
           <div className="muted">
-            «{active.name}» выбран, но не подключён{connected ? " — нажмите «Перезапустить», чтобы применить" : " — подключите клиент"}.
+            «{active.name}» выбран, но не подключён — нажмите «Перезапустить WireGuard».
           </div>
         ) : (
           <div className="muted">Встроенный WireGuard выключен.</div>
@@ -483,7 +495,7 @@ function TunnelEditor(props: { tunnel: WgTunnel; onClose: () => void; onSaved: (
         </button>
       </div>
       <div className="muted" style={{ fontSize: 12, marginTop: 6 }}>
-        Применится при следующем подключении (или «Перезапустить»).
+        Чтобы применить к работающему туннелю — «Перезапустить WireGuard».
       </div>
     </div>
   );

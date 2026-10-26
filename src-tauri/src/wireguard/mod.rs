@@ -199,6 +199,21 @@ pub fn wg_remove(app: AppHandle, state: State<'_, WgState>, id: String) -> Resul
     })
 }
 
+/// Restart the core with the current tunnel settings (edited tunnel, modes, "not
+/// through the tunnel" list) and lift a suspension. The VPN stays as it is.
+#[tauri::command]
+pub async fn wg_restart(app: AppHandle) -> Result<(), String> {
+    app.state::<WgState>().resume();
+    let app2 = app.clone();
+    let r = tauri::async_runtime::spawn_blocking(move || crate::core::apply(&app2))
+        .await
+        .map_err(|e| format!("внутренняя ошибка: {e}"))?;
+    if let Err(e) = &r {
+        let _ = tauri::Emitter::emit(&app, "app://error", format!("WireGuard: {e}"));
+    }
+    r
+}
+
 /// Connect a tunnel (`Some`) or disconnect (`None`), independently of the VPN: the core
 /// starts for the tunnel alone, is restarted to add/remove it, or stops when neither
 /// the tunnel nor the VPN is on.

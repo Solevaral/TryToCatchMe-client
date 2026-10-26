@@ -125,6 +125,7 @@ export const wgUpdateConf = (id: string, text: string) => invoke<WgTunnel>("wg_u
 export const wgExport = (id: string) => invoke<string>("wg_export", { id });
 export const wgRemove = (id: string) => invoke<void>("wg_remove", { id });
 export const wgSetActive = (id: string | null) => invoke<void>("wg_set_active", { id });
+export const wgRestart = () => invoke<void>("wg_restart");
 export const wgStatus = () => invoke<WgStatus>("wg_status");
 export const wgCheck = () => invoke<number>("wg_check");
 export const wgMigrationOffer = () => invoke<WgMigration | null>("wg_migration_offer");

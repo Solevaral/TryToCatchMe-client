@@ -49,6 +49,23 @@ pub struct Settings {
     /// the server). Ignored while `direct_interface` is automatic.
     #[serde(default)]
     pub proxy_via_direct_interface: bool,
+    /// TUN + `direct_interface`: programs whose traffic bypasses the client and leaves
+    /// through the physical uplink (the other VPN's own client — else a loop).
+    #[serde(default = "default_bypass_processes")]
+    pub tun_bypass_processes: Vec<String>,
+    /// Same for addresses: IPs, CIDRs or domains (resolved on connect).
+    #[serde(default)]
+    pub tun_bypass_addresses: Vec<String>,
+}
+
+fn default_bypass_processes() -> Vec<String> {
+    let names: &[&str] = if cfg!(windows) {
+        &["wireguard.exe", "amneziawg.exe", "openvpn.exe"]
+    } else {
+        // Kernel WireGuard has no process: only userspace clients can match here.
+        &["openvpn", "amneziawg-go", "wireguard-go"]
+    };
+    names.iter().map(|s| s.to_string()).collect()
 }
 
 impl Default for Settings {
@@ -63,6 +80,8 @@ impl Default for Settings {
             verbose_logs: false,
             direct_interface: None,
             proxy_via_direct_interface: false,
+            tun_bypass_processes: default_bypass_processes(),
+            tun_bypass_addresses: Vec::new(),
         }
     }
 }

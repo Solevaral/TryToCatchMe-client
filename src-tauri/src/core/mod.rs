@@ -239,15 +239,36 @@ impl CoreState {
         });
         // TUN captures the other VPN's own packets to its server too; sent to `direct`,
         // now bound to that VPN's tunnel, they'd loop back into it and kill the tunnel.
-        // A "direct" rule doesn't help (direct is the bound outbound), so only warn.
-        if tun {
-            if let Some(iface) = &direct_interface {
-                app_error(
-                    app,
-                    format!("TUN + прямой трафик через «{iface}»: пакеты самого VPN-туннеля «{iface}» к его серверу тоже попадут в TUN и уйдут обратно в туннель — он может оборваться. Выведите адрес сервера этого VPN из TUN (исключите его маршрут) или используйте режим «Системный прокси»."),
-                );
+        // The bypass lists send them to the unbound uplink instead (only in this case:
+        // process lookup costs CPU).
+        let (bypass_processes, bypass_cidrs) = match (&direct_interface, tun) {
+            (Some(iface), true) => {
+                let processes: Vec<String> = settings
+                    .tun_bypass_processes
+                    .iter()
+                    .map(|p| p.trim().to_string())
+                    .filter(|p| !p.is_empty())
+                    .collect();
+                let cidrs = bypass_cidrs(app, &settings.tun_bypass_addresses);
+                if processes.is_empty() && cidrs.is_empty() {
+                    app_error(
+                        app,
+                        format!("TUN + прямой трафик через «{iface}»: списки «Пропускать мимо TUN» пусты — пакеты самого VPN «{iface}» к его серверу попадут в TUN и уйдут обратно в туннель, он может оборваться. Добавьте программу или адрес сервера этого VPN в настройках."),
+                    );
+                } else {
+                    app_log(
+                        app,
+                        format!(
+                            "Мимо TUN напрямую через провайдера: программы [{}], адреса [{}]",
+                            processes.join(", "),
+                            cidrs.join(", ")
+                        ),
+                    );
+                }
+                (processes, cidrs)
             }
-        }
+            _ => (Vec::new(), Vec::new()),
+        };
 
         ensure_port_free(CLASH_CONTROLLER, "Clash API")?;
         ensure_port_free(&format!("{MIXED_LISTEN}:{port}"), "локальный прокси")?;
@@ -272,6 +293,8 @@ impl CoreState {
             tun_ipv6,
             direct_interface: direct_interface.clone(),
             proxy_via_direct_interface: settings.proxy_via_direct_interface,
+            tun_bypass_processes: bypass_processes.clone(),
+            tun_bypass_cidrs: bypass_cidrs.clone(),
             // `info` logs every connection — real CPU cost in TUN mode.
             log_level: if settings.verbose_logs { "info".into() } else { "warn".into() },
         };
@@ -586,6 +609,31 @@ fn preflight_check(bin: &PathBuf, work_dir: &PathBuf, cfg_path: &PathBuf) -> Res
 type LogTail = Arc<Mutex<Vec<String>>>;
 
 /// Informational step in the log console (so it's never empty on failure).
+/// The TUN bypass addresses as CIDRs: IPs/CIDRs as is, domains resolved now (all their
+/// addresses). Unresolvable entries are reported and skipped.
+fn bypass_cidrs(app: &AppHandle, entries: &[String]) -> Vec<String> {
+    use std::net::ToSocketAddrs;
+    let mut out: Vec<String> = Vec::new();
+    for entry in entries.iter().map(|e| e.trim()).filter(|e| !e.is_empty()) {
+        let cidrs: Vec<String> = match config::bypass_cidr(entry) {
+            Some(c) => vec![c],
+            None => (entry, 0)
+                .to_socket_addrs()
+                .map(|addrs| addrs.filter_map(|a| config::bypass_cidr(&a.ip().to_string())).collect())
+                .unwrap_or_default(),
+        };
+        if cidrs.is_empty() {
+            app_error(app, format!("Пропуск мимо TUN: «{entry}» — не IP-адрес и не удалось определить адрес домена"));
+        }
+        for c in cidrs {
+            if !out.contains(&c) {
+                out.push(c);
+            }
+        }
+    }
+    out
+}
+
 fn app_log(app: &AppHandle, msg: String) {
     let _ = app.emit("app://log", msg);
 }

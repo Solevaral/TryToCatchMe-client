@@ -70,6 +70,27 @@ pub struct GenOptions {
     /// `direct_interface`: the VPN server itself is then reached through the other VPN
     /// (helps when the local ISP blocks the server). No effect without `direct_interface`.
     pub proxy_via_direct_interface: bool,
+    /// TUN + `direct_interface`: traffic of these programs (e.g. the other VPN's own
+    /// client, `wireguard.exe`) goes to `direct-physical` — the uplink without the
+    /// binding — instead of looping back into the other VPN's tunnel through `direct`.
+    pub tun_bypass_processes: Vec<String>,
+    /// Same for these destinations (CIDRs, e.g. the other VPN's server): also excluded
+    /// from the TUN routes. Ignored outside TUN + `direct_interface`.
+    pub tun_bypass_cidrs: Vec<String>,
+}
+
+/// An IP or CIDR from the bypass list as a CIDR (`1.2.3.4` → `1.2.3.4/32`); `None`
+/// for anything else (a domain, a typo).
+pub fn bypass_cidr(entry: &str) -> Option<String> {
+    let entry = entry.trim();
+    let (ip, prefix) = match entry.split_once('/') {
+        Some((ip, p)) => (ip, Some(p.parse::<u8>().ok()?)),
+        None => (entry, None),
+    };
+    let ip: std::net::IpAddr = ip.parse().ok()?;
+    let max = if ip.is_ipv4() { 32 } else { 128 };
+    let prefix = prefix.unwrap_or(max);
+    (prefix <= max).then(|| format!("{ip}/{prefix}"))
 }
 
 impl Default for GenOptions {
@@ -89,6 +110,8 @@ impl Default for GenOptions {
             tun_ipv6: true,
             direct_interface: None,
             proxy_via_direct_interface: false,
+            tun_bypass_processes: Vec::new(),
+            tun_bypass_cidrs: Vec::new(),
         }
     }
 }
@@ -210,7 +233,23 @@ pub fn generate(opts: &GenOptions) -> Value {
     //    (services, geosite) never match, so e.g. YouTube would fall to `final`.
     // 2. hijack-dns — in TUN mode, answer the system's DNS queries ourselves.
     // 3. optional QUIC block, then the routing layer's rules.
-    let mut rules = vec![json!({ "action": "sniff" })];
+    // 0. TUN with direct bound to another VPN's tunnel: that VPN's own packets (its
+    //    client process, its server address) leave through the uplink unbound —
+    //    through `direct` they'd loop back into its tunnel. First, before anything
+    //    else can claim them.
+    let mut rules = Vec::new();
+    let bypass = opts.tun && opts.direct_interface.is_some();
+    if bypass {
+        // An unbound direct: auto_detect_interface puts it on the physical uplink.
+        outbounds.push(json!({ "type": "direct", "tag": "direct-physical" }));
+        if !opts.tun_bypass_processes.is_empty() {
+            rules.push(json!({ "process_name": opts.tun_bypass_processes, "outbound": "direct-physical" }));
+        }
+        if !opts.tun_bypass_cidrs.is_empty() {
+            rules.push(json!({ "ip_cidr": opts.tun_bypass_cidrs, "outbound": "direct-physical" }));
+        }
+    }
+    rules.push(json!({ "action": "sniff" }));
     if opts.tun {
         rules.push(json!({ "protocol": "dns", "action": "hijack-dns" }));
     }
@@ -271,6 +310,11 @@ pub fn generate(opts: &GenOptions) -> Value {
             // stack hands TCP back through the tun as inbound packets). Keep in sync
             // with platform::linux::IFACE.
             tun["interface_name"] = json!(TUN_IFACE_LINUX);
+        }
+        // Keep the bypassed addresses off the tun altogether (the route rule above
+        // still catches packets that reach it anyway, e.g. a socket bound to the tun).
+        if bypass && !opts.tun_bypass_cidrs.is_empty() {
+            tun["route_exclude_address"] = json!(opts.tun_bypass_cidrs);
         }
         inbounds.insert(0, tun);
     }
@@ -636,6 +680,77 @@ mod tests {
         expected["outbounds"][1]["bind_interface"] = json!("wg0");
         expected["outbounds"][2]["bind_interface"] = json!("wg0");
         assert_eq!(cfg, expected);
+    }
+
+    fn tun_bypass(tun: bool, iface: Option<&str>) -> GenOptions {
+        GenOptions {
+            tun,
+            direct_interface: iface.map(str::to_string),
+            tun_bypass_processes: vec!["wireguard.exe".into(), "openvpn.exe".into()],
+            tun_bypass_cidrs: vec!["46.138.253.10/32".into()],
+            ..pinned()
+        }
+    }
+
+    #[test]
+    fn tun_bypass_goes_first_to_unbound_direct() {
+        let cfg = generate(&tun_bypass(true, Some("wg0")));
+        let outbounds = cfg["outbounds"].as_array().unwrap();
+        let physical = outbounds.iter().find(|o| o["tag"] == "direct-physical").unwrap();
+        assert_eq!(physical, &json!({ "type": "direct", "tag": "direct-physical" }));
+        assert_eq!(outbounds[0]["bind_interface"], "wg0");
+        let rules = cfg["route"]["rules"].as_array().unwrap();
+        assert_eq!(
+            rules[0],
+            json!({ "process_name": ["wireguard.exe", "openvpn.exe"], "outbound": "direct-physical" })
+        );
+        assert_eq!(rules[1], json!({ "ip_cidr": ["46.138.253.10/32"], "outbound": "direct-physical" }));
+        assert_eq!(rules[2]["action"], "sniff");
+        assert_eq!(cfg["inbounds"][0]["route_exclude_address"], json!(["46.138.253.10/32"]));
+        // The rest is the plain TUN + direct_interface config.
+        let mut expected = generate(&GenOptions {
+            tun_bypass_processes: Vec::new(),
+            tun_bypass_cidrs: Vec::new(),
+            ..tun_bypass(true, Some("wg0"))
+        });
+        let r = expected["route"]["rules"].as_array_mut().unwrap();
+        r.insert(0, rules[1].clone());
+        r.insert(0, rules[0].clone());
+        expected["inbounds"][0]["route_exclude_address"] = json!(["46.138.253.10/32"]);
+        assert_eq!(cfg, expected);
+    }
+
+    #[test]
+    fn tun_bypass_only_with_tun_and_direct_interface() {
+        // No TUN or no interface: the lists change nothing.
+        for (tun, iface) in [(false, Some("wg0")), (true, None), (false, None)] {
+            let cfg = generate(&tun_bypass(tun, iface));
+            let plain = generate(&GenOptions {
+                tun_bypass_processes: Vec::new(),
+                tun_bypass_cidrs: Vec::new(),
+                ..tun_bypass(tun, iface)
+            });
+            assert_eq!(cfg, plain);
+            assert!(cfg["outbounds"].as_array().unwrap().iter().all(|o| o["tag"] != "direct-physical"));
+            assert!(!to_string(&cfg).contains("process_name"));
+        }
+        // TUN + interface with empty lists: just the spare outbound, no rules.
+        let cfg = generate(&GenOptions {
+            tun_bypass_processes: Vec::new(),
+            tun_bypass_cidrs: Vec::new(),
+            ..tun_bypass(true, Some("wg0"))
+        });
+        assert_eq!(cfg["route"]["rules"][0]["action"], "sniff");
+        assert!(cfg["inbounds"][0].get("route_exclude_address").is_none());
+    }
+
+    #[test]
+    fn bypass_entries_become_cidrs() {
+        assert_eq!(bypass_cidr(" 46.138.253.10 ").as_deref(), Some("46.138.253.10/32"));
+        assert_eq!(bypass_cidr("10.0.0.0/8").as_deref(), Some("10.0.0.0/8"));
+        assert_eq!(bypass_cidr("2001:db8::1").as_deref(), Some("2001:db8::1/128"));
+        assert_eq!(bypass_cidr("1.2.3.4/33"), None);
+        assert_eq!(bypass_cidr("home.example.com"), None);
     }
 
     #[test]

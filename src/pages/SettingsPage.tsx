@@ -10,6 +10,64 @@ import {
   type Settings,
 } from "../api/backend";
 
+const IS_LINUX = navigator.userAgent.includes("Linux");
+
+const fieldStyle: React.CSSProperties = {
+  background: "var(--bg-2)",
+  border: "1px solid var(--border)",
+  borderRadius: 8,
+  color: "var(--text-0)",
+  padding: "6px 8px",
+};
+
+/** Editable list of strings: chips with ×, plus an input to add one. */
+function ListEditor(props: {
+  label: string;
+  placeholder: string;
+  items: string[];
+  onChange: (items: string[]) => void;
+}) {
+  const [draft, setDraft] = useState("");
+  function add() {
+    const v = draft.trim();
+    if (v && !props.items.includes(v)) props.onChange([...props.items, v]);
+    setDraft("");
+  }
+  return (
+    <div style={{ marginBottom: 10 }}>
+      <div style={{ fontSize: 13, marginBottom: 4 }}>{props.label}</div>
+      <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 6 }}>
+        {props.items.map((item) => (
+          <span key={item} style={{ ...fieldStyle, padding: "2px 4px 2px 8px", fontSize: 12 }}>
+            {item}
+            <button
+              className="btn"
+              style={{ padding: "0 6px", marginLeft: 4 }}
+              title="Удалить"
+              onClick={() => props.onChange(props.items.filter((i) => i !== item))}
+            >
+              ×
+            </button>
+          </span>
+        ))}
+        {props.items.length === 0 && <span className="muted" style={{ fontSize: 12 }}>пусто</span>}
+      </div>
+      <div style={{ display: "flex", gap: 8 }}>
+        <input
+          value={draft}
+          placeholder={props.placeholder}
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={(e) => e.key === "Enter" && add()}
+          style={{ ...fieldStyle, width: 260 }}
+        />
+        <button className="btn" onClick={add} disabled={!draft.trim()}>
+          Добавить
+        </button>
+      </div>
+    </div>
+  );
+}
+
 export default function SettingsPage() {
   const [version, setVersion] = useState<string>("…");
   const [autostart, setAutostart] = useState<boolean | null>(null);
@@ -226,11 +284,36 @@ export default function SettingsPage() {
               </span>
             </label>
             {settings.capture_tun && settings.direct_interface && (
-              <div style={{ fontSize: 12, marginTop: 8, color: "var(--warn)" }}>
-                Включён TUN: он перехватит и пакеты самого VPN «{settings.direct_interface}» к
-                его серверу, и они уйдут обратно в этот же туннель — туннель может оборваться.
-                Правило «напрямую» не поможет (прямой трафик и есть этот туннель). Выведите
-                адрес сервера этого VPN из TUN или используйте режим «Системный прокси».
+              <div style={{ marginTop: 14 }}>
+                <div style={{ fontWeight: 550 }}>Пропускать мимо TUN (напрямую через провайдера)</div>
+                <div className="muted" style={{ fontSize: 12, margin: "4px 0 8px" }}>
+                  Трафик этих программ/адресов идёт напрямую через провайдера и не попадает под
+                  правила клиента. Сюда нужно добавить сам VPN «{settings.direct_interface}»:
+                  иначе TUN перехватит его пакеты к серверу и отправит обратно в этот же туннель.
+                </div>
+                <ListEditor
+                  label="Программы"
+                  placeholder={IS_LINUX ? "openvpn" : "wireguard.exe"}
+                  items={settings.tun_bypass_processes}
+                  onChange={(v) => patch({ tun_bypass_processes: v })}
+                />
+                <ListEditor
+                  label="Адреса"
+                  placeholder="IP, подсеть или домен сервера VPN"
+                  items={settings.tun_bypass_addresses}
+                  onChange={(v) => patch({ tun_bypass_addresses: v })}
+                />
+                <div className="muted" style={{ fontSize: 12, marginTop: 6 }}>
+                  {IS_LINUX
+                    ? "Обычный WireGuard в Linux работает в ядре, у его пакетов нет программы — укажите адрес его сервера (Endpoint из конфига)."
+                    : "Надёжнее всего — адрес сервера VPN (Endpoint из его конфига): WireGuard для Windows может отправлять пакеты из драйвера, без программы."}
+                </div>
+                {settings.tun_bypass_processes.length === 0 && settings.tun_bypass_addresses.length === 0 && (
+                  <div style={{ fontSize: 12, marginTop: 8, color: "var(--warn)" }}>
+                    Списки пусты: TUN перехватит пакеты самого VPN «{settings.direct_interface}» к
+                    его серверу и отправит их обратно в этот же туннель — туннель может оборваться.
+                  </div>
+                )}
               </div>
             )}
           </>

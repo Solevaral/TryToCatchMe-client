@@ -51,6 +51,10 @@ export interface Settings {
   direct_interface: string | null;
   /** Reach the VPN server through `direct_interface` too (ignored while it's automatic). */
   proxy_via_direct_interface: boolean;
+  /** TUN + direct_interface: programs whose traffic goes straight to the ISP. */
+  tun_bypass_processes: string[];
+  /** Same for addresses: IPs, CIDRs or domains. */
+  tun_bypass_addresses: string[];
 }
 
 /** Names of the system's active network interfaces. */

@@ -10,6 +10,7 @@
 //!   monitor  — auto-failover between profiles
 //!   platform — OS-specific bits (elevation, wintun)
 
+pub mod applog;
 pub mod clash;
 pub mod commands;
 pub mod core;
@@ -70,6 +71,7 @@ pub fn run() {
             app.state::<RoutingStore>().load(app.handle());
             app.state::<settings::SettingsStore>().load(app.handle());
             app.state::<wireguard::WgState>().load(app.handle());
+            applog::init(app.handle());
             // Clean up a system proxy left pointing at us by a crash/kill (or by an
             // older version that let sing-box own it). Report once the UI is listening.
             let port = app.state::<settings::SettingsStore>().get().proxy_port;

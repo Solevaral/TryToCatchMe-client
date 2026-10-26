@@ -81,6 +81,9 @@ impl WgState {
 /// The offer to move from the old "direct traffic through an interface" options.
 pub fn migration_offer(app: &AppHandle) -> Option<Migration> {
     let s = app.state::<SettingsStore>().get();
+    if s.wg_migrated {
+        return None;
+    }
     let legacy = wg::LegacyOptions {
         direct_interface: s.direct_interface,
         proxy_via_direct_interface: s.proxy_via_direct_interface,
@@ -260,8 +263,10 @@ pub fn wg_migrate(app: AppHandle, store: State<'_, SettingsStore>) -> Result<(),
             s.provider_list.push(e);
         }
     }
-    s.direct_interface = None;
-    s.proxy_via_direct_interface = false;
+    // The old options stay as they are: while a built-in tunnel is on they're not
+    // applied, and an older version (a rollback) keeps routing exactly as before —
+    // clearing them once sent all direct traffic past the user's VPN after a rollback.
+    s.wg_migrated = true;
     store.set(&app, s);
     Ok(())
 }

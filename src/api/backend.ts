@@ -105,6 +105,8 @@ export interface WgStatus {
   connections: number;
   upload: number;
   download: number;
+  /** Why the chosen tunnel is held off right now (another copy running, not answering). */
+  suspended: string | null;
 }
 
 export interface WgMigration {

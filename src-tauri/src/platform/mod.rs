@@ -63,6 +63,26 @@ fn interface_names() -> Vec<String> {
     dir.filter_map(|e| e.ok()).map(|e| e.file_name().to_string_lossy().into_owned()).collect()
 }
 
+/// Every adapter's IP addresses as (adapter, ip) — to spot another copy of a WireGuard
+/// tunnel (the WireGuard app holding the same address).
+pub fn interface_addresses() -> Vec<(String, String)> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const QUERY: &str = "[Console]::OutputEncoding = [Text.Encoding]::UTF8; Get-NetIPAddress -ErrorAction SilentlyContinue | ForEach-Object { $_.InterfaceAlias + '|' + $_.IPAddress }";
+        let mut ps = std::process::Command::new("powershell");
+        ps.args(["-NoProfile", "-NonInteractive", "-Command", QUERY]);
+        ps.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+        let Ok(out) = ps.output() else { return Vec::new() };
+        ttcm_core::wireguard::parse_name_ip_lines(&String::from_utf8_lossy(&out.stdout))
+    }
+    #[cfg(not(windows))]
+    {
+        let Ok(out) = std::process::Command::new("ip").args(["-o", "addr", "show"]).output() else { return Vec::new() };
+        ttcm_core::wireguard::parse_ip_o_addr(&String::from_utf8_lossy(&out.stdout))
+    }
+}
+
 /// Other VPN/proxy clients that are running right now (display names). They compete for
 /// the system proxy and routes, so traffic may silently go through them instead of us.
 pub fn running_vpn_clients() -> Vec<String> {

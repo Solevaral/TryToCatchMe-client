@@ -448,6 +448,48 @@ pub fn endpoint(t: &WgTunnel, tag: &str, full: bool) -> Value {
     ep
 }
 
+// ---- conflict with another copy of the tunnel ----
+
+/// `name|ip` lines (the app's PowerShell query on Windows) → (adapter, ip).
+pub fn parse_name_ip_lines(text: &str) -> Vec<(String, String)> {
+    text.lines()
+        .filter_map(|l| {
+            let (name, ip) = l.trim().rsplit_once('|')?;
+            let ip = ip.trim().split('%').next()?.to_string();
+            (!name.trim().is_empty() && ip.parse::<std::net::IpAddr>().is_ok()).then(|| (name.trim().to_string(), ip))
+        })
+        .collect()
+}
+
+/// Linux `ip -o addr show` → (interface, ip).
+pub fn parse_ip_o_addr(text: &str) -> Vec<(String, String)> {
+    text.lines()
+        .filter_map(|l| {
+            let f: Vec<&str> = l.split_whitespace().collect();
+            let fam = f.iter().position(|w| *w == "inet" || *w == "inet6")?;
+            let ip = f.get(fam + 1)?.split('/').next()?;
+            ip.parse::<std::net::IpAddr>().ok()?;
+            Some((f.get(1)?.trim_end_matches(':').to_string(), ip.to_string()))
+        })
+        .collect()
+}
+
+/// An adapter that already holds one of the tunnel's own addresses — the WireGuard app
+/// (or any other client) running the same `.conf`. One key can be connected from one
+/// place only: two copies fight over the server and both stop working.
+pub fn conflicting_adapter(t: &WgTunnel, adapters: &[(String, String)]) -> Option<String> {
+    let own: Vec<std::net::IpAddr> = t
+        .interface
+        .addresses
+        .iter()
+        .filter_map(|a| a.split('/').next()?.trim().parse().ok())
+        .collect();
+    adapters
+        .iter()
+        .find(|(_, ip)| ip.parse::<std::net::IpAddr>().is_ok_and(|ip| own.contains(&ip)))
+        .map(|(name, _)| name.clone())
+}
+
 // ---- migration from 1.3.8–1.3.91 ----
 
 /// The interface options of 1.3.8–1.3.91 (an external VPN's adapter).
@@ -726,6 +768,34 @@ mod tests {
         assert!(dangling.active_tunnel().is_none());
         // An empty / old file reads as "no tunnels".
         assert_eq!(serde_json::from_str::<WgStore>("{}").unwrap(), WgStore::default());
+    }
+
+    #[test]
+    fn another_copy_of_the_tunnel_is_detected() {
+        let t = tunnel(&sample()); // 10.6.0.3/32, fd00::3/128
+        let win = "Ethernet|192.168.31.128\nEthernet|fe80::1%12\nall-rodoro-home|10.6.0.3\nLoopback Pseudo-Interface 1|127.0.0.1\n";
+        let adapters = parse_name_ip_lines(win);
+        assert_eq!(adapters.len(), 4);
+        assert_eq!(adapters[1], ("Ethernet".to_string(), "fe80::1".to_string()));
+        assert_eq!(conflicting_adapter(&t, &adapters).as_deref(), Some("all-rodoro-home"));
+        // IPv6 address of the tunnel counts too.
+        let v6 = parse_name_ip_lines("wg-home|fd00::3");
+        assert_eq!(conflicting_adapter(&t, &v6).as_deref(), Some("wg-home"));
+        // Nothing else holds it: no conflict.
+        assert_eq!(conflicting_adapter(&t, &parse_name_ip_lines("Ethernet|192.168.31.128")), None);
+        assert!(parse_name_ip_lines("garbage\n|1.2.3.4\nx|not-ip").is_empty());
+    }
+
+    #[test]
+    fn linux_ip_addr_output_is_parsed() {
+        let text = "1: lo    inet 127.0.0.1/8 scope host lo\\       valid_lft forever\n\
+                    2: enp3s0    inet 192.168.1.5/24 brd 192.168.1.255 scope global enp3s0\n\
+                    5: wg0    inet 10.6.0.3/32 scope global wg0\n\
+                    5: wg0    inet6 fd00::3/128 scope global \n";
+        let a = parse_ip_o_addr(text);
+        assert_eq!(a[2], ("wg0".to_string(), "10.6.0.3".to_string()));
+        assert_eq!(a[3], ("wg0".to_string(), "fd00::3".to_string()));
+        assert_eq!(conflicting_adapter(&tunnel(&sample()), &a).as_deref(), Some("wg0"));
     }
 
     #[test]

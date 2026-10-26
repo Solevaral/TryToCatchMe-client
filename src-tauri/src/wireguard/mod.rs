@@ -22,6 +22,9 @@ pub struct WgState {
     inner: Mutex<WgStore>,
     /// The tunnel the running core was started with (`None`: no tunnel in the config).
     applied: Mutex<Option<String>>,
+    /// Why the chosen tunnel is held off right now (another copy of it is running, or it
+    /// stopped answering). The choice itself stays; connecting it again clears this.
+    suspended: Mutex<Option<String>>,
 }
 
 impl WgState {
@@ -62,8 +65,40 @@ impl WgState {
         self.inner.lock().clone()
     }
 
+    /// The tunnel to run: the chosen one, unless it's suspended.
     pub fn active(&self) -> Option<WgTunnel> {
+        if self.suspended.lock().is_some() {
+            return None;
+        }
         self.inner.lock().active_tunnel().cloned()
+    }
+
+    /// Hold the chosen tunnel off (see `suspended`), with the reason for the UI.
+    pub fn suspend(&self, reason: String) {
+        *self.suspended.lock() = Some(reason);
+    }
+
+    pub fn resume(&self) {
+        *self.suspended.lock() = None;
+    }
+
+    /// The running core has a tunnel in it.
+    pub fn is_applied(&self) -> bool {
+        self.applied.lock().is_some()
+    }
+
+    /// Another adapter holding the tunnel's address (the WireGuard app running the same
+    /// `.conf`)? Then the tunnel is suspended — two copies of one key break each other —
+    /// and the reason is returned. Runs a system query: not for tight loops.
+    pub fn check_conflict(&self) -> Option<String> {
+        let t = self.active()?;
+        let adapter = wg::conflicting_adapter(&t, &crate::platform::interface_addresses())?;
+        let reason = format!(
+            "адрес туннеля «{}» уже занят адаптером «{adapter}» — этот же туннель запущен в программе WireGuard (или другом клиенте). Один ключ не может работать в двух местах: встроенный туннель выключен, VPN работает без него. Выключите туннель там и нажмите «Подключить» здесь.",
+            t.name
+        );
+        self.suspend(reason.clone());
+        Some(reason)
     }
 
     /// Called by the core on start/stop: which tunnel (if any) it runs with.
@@ -178,6 +213,7 @@ pub async fn wg_set_active(app: AppHandle, id: Option<String>) -> Result<(), Str
         s.active = id;
         Ok(())
     })?;
+    app.state::<WgState>().resume();
     let app2 = app.clone();
     let r = tauri::async_runtime::spawn_blocking(move || crate::core::apply(&app2))
         .await
@@ -199,6 +235,8 @@ pub struct WgStatus {
     pub connections: u64,
     pub upload: u64,
     pub download: u64,
+    /// Why the chosen tunnel is held off (another copy running / not answering).
+    pub suspended: Option<String>,
 }
 
 #[tauri::command]
@@ -228,7 +266,8 @@ pub async fn wg_status(app: AppHandle) -> WgStatus {
             }
         }
     }
-    WgStatus { running, endpoint, connections, upload, download }
+    let suspended = state.suspended.lock().clone();
+    WgStatus { running, endpoint, connections, upload, download, suspended }
 }
 
 /// Round-trip time of a request through the tunnel (proves the handshake works).

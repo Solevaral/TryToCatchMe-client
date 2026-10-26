@@ -270,6 +270,11 @@ export default function WireGuardPage() {
 
       <div className="card" style={{ marginBottom: 18 }}>
         <div style={{ fontWeight: 600, marginBottom: 10 }}>Статус</div>
+        {status?.suspended && active && (
+          <div style={{ fontSize: 13, marginBottom: 8, color: "var(--warn)" }}>
+            Туннель «{active.name}» приостановлен: {status.suspended}
+          </div>
+        )}
         {running ? (
           <>
             <div>

@@ -53,7 +53,15 @@ pub struct CoreStatus {
 /// it stops. Blocking — call off the UI thread.
 pub fn apply(app: &AppHandle) -> Result<(), String> {
     let core = app.state::<CoreState>();
-    let want = core.vpn.load(Ordering::SeqCst) || app.state::<WgState>().active().is_some();
+    let vpn = core.vpn.load(Ordering::SeqCst);
+    // Tunnel alone: don't start a core for a tunnel that can't run (start() would only
+    // find the conflict after the system proxy / TUN are already set up).
+    if !vpn {
+        if let Some(reason) = app.state::<WgState>().check_conflict() {
+            let _ = app.emit("app://error", format!("WireGuard: {reason}"));
+        }
+    }
+    let want = vpn || app.state::<WgState>().active().is_some();
     let streams = app.state::<ClashStreams>();
     let monitor = app.state::<crate::monitor::Monitor>();
     if want {
@@ -255,6 +263,10 @@ impl CoreState {
         }
         // Built-in WireGuard: the active tunnel runs inside the core. It replaces the
         // external-interface options below — said out loud, never silently.
+        // The same tunnel already up in the WireGuard app: hold ours off (both would die).
+        if let Some(reason) = app.state::<WgState>().check_conflict() {
+            app_error(app, format!("WireGuard: {reason}"));
+        }
         let wg_tunnel = app.state::<WgState>().active();
         // Internet traffic into the tunnel (the modes): its peer must take any address.
         let wg_full = settings.wg_direct_via_tunnel || (settings.wg_vpn_over_tunnel && proxy_outbound.is_some());

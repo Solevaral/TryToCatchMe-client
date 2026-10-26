@@ -89,7 +89,7 @@ fn run_loop(app: AppHandle, stop: Arc<AtomicBool>) {
             continue;
         }
 
-        if !app.state::<CoreState>().status().running {
+        if !app.state::<CoreState>().vpn_connected() {
             continue;
         }
         if !app.state::<SettingsStore>().get().auto_switch_on() {

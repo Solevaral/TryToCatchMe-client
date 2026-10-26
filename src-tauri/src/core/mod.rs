@@ -30,6 +30,9 @@ pub struct CoreState {
     inner: Mutex<Inner>,
     /// The core is supposed to be running (set on successful start, cleared on stop).
     expected: AtomicBool,
+    /// The user wants the VPN (the active profile) on. The core also runs without it
+    /// while a built-in WireGuard tunnel is on — the two are switched separately.
+    vpn: AtomicBool,
 }
 
 #[derive(Default)]
@@ -41,6 +44,33 @@ struct Inner {
 pub struct CoreStatus {
     pub running: bool,
     pub pid: Option<u32>,
+    /// The VPN is on (the core may also run for a WireGuard tunnel alone).
+    pub vpn: bool,
+}
+
+/// Bring the core in line with what's switched on: the VPN and/or the built-in WireGuard
+/// tunnel. Either one on → the core runs (restarted to pick up the change); both off →
+/// it stops. Blocking — call off the UI thread.
+pub fn apply(app: &AppHandle) -> Result<(), String> {
+    let core = app.state::<CoreState>();
+    let want = core.vpn.load(Ordering::SeqCst) || app.state::<WgState>().active().is_some();
+    let streams = app.state::<ClashStreams>();
+    let monitor = app.state::<crate::monitor::Monitor>();
+    if want {
+        streams.stop();
+        if core.status().running {
+            core.restart(app)?;
+        } else {
+            core.start(app)?;
+        }
+        streams.start(app.clone());
+        monitor.start(app.clone());
+    } else {
+        monitor.stop();
+        streams.stop();
+        core.stop(app)?;
+    }
+    Ok(())
 }
 
 impl CoreState {
@@ -61,6 +91,7 @@ impl CoreState {
         CoreStatus {
             running,
             pid: g.child.as_ref().map(|c| c.id()),
+            vpn: running && self.vpn.load(Ordering::SeqCst),
         }
     }
 
@@ -86,8 +117,10 @@ impl CoreState {
         // Inject the active profile's outbound (if any) so traffic actually goes
         // through the selected server; otherwise fall back to direct-only.
         let profiles = app.state::<ProfileStore>();
-        let proxy_outbound = profiles.active_outbound();
+        let vpn = self.vpn.load(Ordering::SeqCst);
+        let proxy_outbound = if vpn { profiles.active_outbound() } else { None };
         match profiles.active_summary() {
+            _ if !vpn => app_log(app, "VPN выключен — работает только туннель WireGuard".to_string()),
             Some(s) => app_log(app, format!("Профиль: {s}")),
             None => app_log(app, "Профиль не выбран — весь трафик пойдёт напрямую".to_string()),
         }
@@ -510,6 +543,15 @@ impl CoreState {
     pub fn restart(&self, app: &AppHandle) -> Result<(), String> {
         self.stop(app)?;
         self.start(app)
+    }
+
+    pub fn set_vpn(&self, on: bool) {
+        self.vpn.store(on, Ordering::SeqCst);
+    }
+
+    /// The VPN is on and the core is up (what "Подключено" means in the UI and tray).
+    pub fn vpn_connected(&self) -> bool {
+        self.vpn.load(Ordering::SeqCst) && self.status().running
     }
 
     /// Stop the core and give the system proxy back. On Windows sing-box is hard-killed

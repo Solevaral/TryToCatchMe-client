@@ -6,6 +6,8 @@ import { invoke } from "@tauri-apps/api/core";
  */
 
 export interface CoreStatus {
+  /** The VPN is on (the core may also run for a WireGuard tunnel alone). */
+  vpn: boolean;
   running: boolean;
   pid: number | null;
 }

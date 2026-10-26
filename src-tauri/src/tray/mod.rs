@@ -83,7 +83,7 @@ pub fn set_state(app: &AppHandle, state: &str) {
 
 /// Toggle the VPN from the tray, mirroring the UI's connect/disconnect flow.
 fn toggle_vpn(app: &AppHandle) {
-    if app.state::<CoreState>().status().running {
+    if app.state::<CoreState>().vpn_connected() {
         disconnect(app);
     } else {
         connect(app);
@@ -93,19 +93,19 @@ fn toggle_vpn(app: &AppHandle) {
 /// Connect with the active profile. Starting blocks until the core is up — do it off the
 /// event-loop thread so the window and tray stay responsive.
 pub(crate) fn connect(app: &AppHandle) {
-    if app.state::<CoreState>().status().running {
+    if app.state::<CoreState>().vpn_connected() {
         return;
     }
     let app = app.clone();
     let _ = app.emit("vpn://state", "connecting");
-    std::thread::spawn(move || match app.state::<CoreState>().start(&app) {
+    app.state::<CoreState>().set_vpn(true);
+    std::thread::spawn(move || match crate::core::apply(&app) {
         Ok(()) => {
-            app.state::<ClashStreams>().start(app.clone());
-            app.state::<crate::monitor::Monitor>().start(app.clone());
             set_state(&app, "connected");
             let _ = app.emit("vpn://state", "connected");
         }
         Err(e) => {
+            app.state::<CoreState>().set_vpn(false);
             set_state(&app, "error");
             let _ = app.emit("vpn://state", "error");
             let _ = app.emit("app://error", format!("Не удалось подключиться: {e}"));
@@ -113,13 +113,18 @@ pub(crate) fn connect(app: &AppHandle) {
     });
 }
 
-/// Disconnect: stop failover, streams and the core (reverts the OS system proxy).
+/// Disconnect the VPN (a built-in WireGuard tunnel that's on keeps running; with none,
+/// the core stops and the OS system proxy is reverted).
 pub(crate) fn disconnect(app: &AppHandle) {
-    app.state::<crate::monitor::Monitor>().stop();
-    app.state::<ClashStreams>().stop();
-    let _ = app.state::<CoreState>().stop(app);
+    app.state::<CoreState>().set_vpn(false);
     set_state(app, "idle");
     let _ = app.emit("vpn://state", "idle");
+    let app = app.clone();
+    std::thread::spawn(move || {
+        if let Err(e) = crate::core::apply(&app) {
+            let _ = app.emit("app://error", e);
+        }
+    });
 }
 
 /// Stop the core (reverts the OS system proxy) then exit — no dead fallback.

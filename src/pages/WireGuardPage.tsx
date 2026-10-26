@@ -33,7 +33,8 @@ function bytes(n: number): string {
 const endpointOf = (t: WgTunnel) => t.peers.find((p) => p.endpoint)?.endpoint ?? "—";
 
 export default function WireGuardPage() {
-  const { connected, connect, restart, busy } = useConnection();
+  const { connected } = useConnection();
+  const [busy, setBusy] = useState(false);
   const [store, setStore] = useState<WgStore | null>(null);
   const [settings, setSettings] = useState<Settings | null>(null);
   const [status, setStatus] = useState<WgStatus | null>(null);
@@ -102,9 +103,9 @@ export default function WireGuardPage() {
   // Connect / disconnect: the tunnel lives inside the core, so a change restarts it
   // (or starts the client when it's off).
   async function activate(id: string | null) {
+    setBusy(true);
     await run(() => wgSetActive(id));
-    if (connected) await restart();
-    else if (id) await connect();
+    setBusy(false);
   }
 
   async function doExport(t: WgTunnel) {
@@ -237,8 +238,7 @@ export default function WireGuardPage() {
           </div>
         )}
         <div className="muted" style={{ fontSize: 12, marginTop: 8 }}>
-          Туннель работает внутри ядра клиента (без программы WireGuard), поэтому подключение
-          туннеля запускает или перезапускает клиент. Если этот же туннель открыт в программе
+          Туннель включается отдельно от VPN: можно держать только туннель, только VPN или оба. Если этот же туннель открыт в программе
           WireGuard — выключите его там.
         </div>
       </div>

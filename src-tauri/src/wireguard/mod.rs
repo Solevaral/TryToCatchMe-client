@@ -161,11 +161,12 @@ pub fn wg_remove(app: AppHandle, state: State<'_, WgState>, id: String) -> Resul
     })
 }
 
-/// Choose the active tunnel (`None` = built-in WireGuard off). Takes effect on the next
-/// connect; the UI restarts the core right away when it's running.
+/// Connect a tunnel (`Some`) or disconnect (`None`), independently of the VPN: the core
+/// starts for the tunnel alone, is restarted to add/remove it, or stops when neither
+/// the tunnel nor the VPN is on.
 #[tauri::command]
-pub fn wg_set_active(app: AppHandle, state: State<'_, WgState>, id: Option<String>) -> Result<(), String> {
-    state.with(&app, |s| {
+pub async fn wg_set_active(app: AppHandle, id: Option<String>) -> Result<(), String> {
+    app.state::<WgState>().with(&app, |s| {
         if let Some(id) = &id {
             if !s.tunnels.iter().any(|t| &t.id == id) {
                 return Err("туннель не найден".into());
@@ -173,7 +174,15 @@ pub fn wg_set_active(app: AppHandle, state: State<'_, WgState>, id: Option<Strin
         }
         s.active = id;
         Ok(())
-    })
+    })?;
+    let app2 = app.clone();
+    let r = tauri::async_runtime::spawn_blocking(move || crate::core::apply(&app2))
+        .await
+        .map_err(|e| format!("внутренняя ошибка: {e}"))?;
+    if let Err(e) = &r {
+        let _ = tauri::Emitter::emit(&app, "app://error", format!("WireGuard: {e}"));
+    }
+    r
 }
 
 #[derive(Serialize)]

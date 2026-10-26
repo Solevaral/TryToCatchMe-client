@@ -80,6 +80,18 @@ pub fn run() {
                     let _ = tauri::Emitter::emit(&handle, "app://log", msg);
                 });
             }
+            // A built-in WireGuard tunnel left on stays on across restarts (like the
+            // WireGuard app); the VPN itself is still connected by hand.
+            if let Some(t) = app.state::<wireguard::WgState>().active() {
+                let handle = app.handle().clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_secs(2));
+                    let _ = tauri::Emitter::emit(&handle, "app://log", format!("WireGuard: туннель «{}» был включён — подключаю", t.name));
+                    if let Err(e) = core::apply(&handle) {
+                        let _ = tauri::Emitter::emit(&handle, "app://error", format!("WireGuard: {e}"));
+                    }
+                });
+            }
             // Service library from GitHub (directly; after connecting — through the VPN).
             library::schedule(app.handle(), None);
             // System tray (starts in the idle/blue state) — also under the All in One host.

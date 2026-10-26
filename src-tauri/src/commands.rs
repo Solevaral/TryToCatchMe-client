@@ -41,25 +41,25 @@ where
     result
 }
 
+/// Turn the VPN on. A running core (a WireGuard tunnel alone) is restarted with it.
 #[tauri::command]
 pub async fn core_start(app: AppHandle) -> Result<(), String> {
-    run_core(&app, |a| a.state::<CoreState>().start(a)).await?;
-    // Core is up (Clash API ready) — start live traffic/log streams + failover monitor.
-    app.state::<ClashStreams>().start(app.clone());
-    app.state::<crate::monitor::Monitor>().start(app.clone());
-    Ok(())
+    app.state::<CoreState>().set_vpn(true);
+    let r = run_core(&app, crate::core::apply).await;
+    if r.is_err() {
+        app.state::<CoreState>().set_vpn(false);
+    }
+    r
 }
 
+/// Turn the VPN off. A built-in WireGuard tunnel that's on keeps running.
 #[tauri::command]
-pub fn core_stop(
-    app: AppHandle,
-    state: State<'_, CoreState>,
-    clash: State<'_, ClashStreams>,
-    monitor: State<'_, crate::monitor::Monitor>,
-) -> Result<(), String> {
-    monitor.stop();
-    clash.stop();
-    state.stop(&app)
+pub async fn core_stop(app: AppHandle) -> Result<(), String> {
+    app.state::<CoreState>().set_vpn(false);
+    let app2 = app.clone();
+    tauri::async_runtime::spawn_blocking(move || crate::core::apply(&app2))
+        .await
+        .map_err(|e| format!("внутренняя ошибка: {e}"))?
 }
 
 #[tauri::command]
@@ -105,7 +105,7 @@ pub async fn profiles_import(app: AppHandle, text: String) -> ImportResult {
 
 /// The local proxy port while connected with a profile (downloads then go through the VPN).
 fn vpn_port(app: &AppHandle) -> Option<u16> {
-    let running = app.state::<CoreState>().status().running;
+    let running = app.state::<CoreState>().vpn_connected();
     let has_proxy = app.state::<ProfileStore>().active_outbound().is_some();
     (running && has_proxy).then(|| app.state::<SettingsStore>().get().proxy_port)
 }
@@ -214,7 +214,7 @@ pub fn services_library(app: AppHandle) -> Vec<Service> {
 /// (through the VPN when connected).
 #[tauri::command]
 pub async fn services_library_refresh(app: AppHandle) -> GeoRefreshResult {
-    let running = app.state::<CoreState>().status().running;
+    let running = app.state::<CoreState>().vpn_connected();
     let has_proxy = app.state::<ProfileStore>().active_outbound().is_some();
     let vpn_port = (running && has_proxy).then(|| app.state::<SettingsStore>().get().proxy_port);
     match crate::library::refresh_now(&app, vpn_port).await {
@@ -250,7 +250,7 @@ pub async fn geo_refresh(app: AppHandle) -> GeoRefreshResult {
             "Нечего обновлять: нет списков antifilter, выбранного региона и сервисов с полным списком доменов (нужен режим «Antifilter» или «Rule»)".into(),
         );
     }
-    let running = app.state::<CoreState>().status().running;
+    let running = app.state::<CoreState>().vpn_connected();
     let has_proxy = app.state::<ProfileStore>().active_outbound().is_some();
     let vpn_port = (running && has_proxy).then(|| app.state::<SettingsStore>().get().proxy_port);
     let had_old = crate::geo::all_present(&app, &files);
@@ -344,7 +344,7 @@ pub fn relaunch_admin(app: AppHandle) {
 #[tauri::command]
 pub async fn diag_run(app: AppHandle, targets: Option<Vec<String>>) -> DiagReport {
     let server = app.state::<ProfileStore>().active_endpoint();
-    let core_running = app.state::<CoreState>().status().running;
+    let core_running = app.state::<CoreState>().vpn_connected();
     let mut targets: Vec<String> = targets
         .unwrap_or_default()
         .into_iter()

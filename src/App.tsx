@@ -51,7 +51,7 @@ export default function App() {
   useEffect(() => {
     coreStatus()
       .then((s) => {
-        if (s.running) {
+        if (s.vpn) {
           setStatus("connected");
           traySetState("connected").catch(() => {});
         }

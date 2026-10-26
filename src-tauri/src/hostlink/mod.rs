@@ -67,7 +67,7 @@ impl HostLink {
 
 /// Status line for the host tile: "Подключено: <profile>" / "Не подключено".
 pub fn status(app: &AppHandle) -> Value {
-    let connected = app.state::<CoreState>().status().running;
+    let connected = app.state::<CoreState>().vpn_connected();
     let settings = app.state::<SettingsStore>().get();
     let profile = app.state::<ProfileStore>().active_name();
     let mode = if settings.capture_tun { "TUN" } else { "системный прокси" };

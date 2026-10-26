@@ -223,6 +223,8 @@ impl CoreState {
         // Built-in WireGuard: the active tunnel runs inside the core. It replaces the
         // external-interface options below — said out loud, never silently.
         let wg_tunnel = app.state::<WgState>().active();
+        // Internet traffic into the tunnel (the modes): its peer must take any address.
+        let wg_full = settings.wg_direct_via_tunnel || (settings.wg_vpn_over_tunnel && proxy_outbound.is_some());
         if let Some(t) = &wg_tunnel {
             let server = t.peers.iter().find_map(|p| p.endpoint.clone()).unwrap_or_default();
             app_log(app, format!("WireGuard: туннель «{}» ({server})", t.name));
@@ -321,7 +323,8 @@ impl CoreState {
             proxy_via_direct_interface: settings.proxy_via_direct_interface,
             tun_bypass_processes: bypass_processes.clone(),
             tun_bypass_cidrs: bypass_cidrs.clone(),
-            wg: wg_tunnel.as_ref().map(|t| ttcm_core::wireguard::endpoint(t, ttcm_core::wireguard::WG_TAG)),
+            wg: wg_tunnel.as_ref().map(|t| ttcm_core::wireguard::endpoint(t, ttcm_core::wireguard::WG_TAG, wg_full)),
+            wg_routes: wg_tunnel.as_ref().map(ttcm_core::wireguard::routed_subnets).unwrap_or_default(),
             wg_dns: wg_tunnel.as_ref().map(|t| ttcm_core::wireguard::dns_servers(&t.interface)).unwrap_or_default(),
             direct_via_wg: settings.wg_direct_via_tunnel,
             proxy_via_wg: settings.wg_vpn_over_tunnel,

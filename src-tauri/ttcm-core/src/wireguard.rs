@@ -366,6 +366,22 @@ pub fn to_conf(iface: &WgInterface, peers: &[WgPeer]) -> String {
 
 // ---- sing-box ----
 
+/// The networks the tunnel is for, from AllowedIPs (e.g. a home LAN `192.168.10.0/24`),
+/// routed into it like WireGuard itself does. Catch-all ranges (`/0`, the `/1` halves)
+/// are left out: whether internet traffic goes in is the user's mode choice.
+pub fn routed_subnets(t: &WgTunnel) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for p in &t.peers {
+        for c in p.allowed_ips.iter().filter_map(|a| bypass_cidr(a)) {
+            let prefix: u8 = c.rsplit('/').next().and_then(|p| p.parse().ok()).unwrap_or(0);
+            if prefix > 1 && !out.contains(&c) {
+                out.push(c);
+            }
+        }
+    }
+    out
+}
+
 /// The tunnel's DNS servers that are IP addresses (wg-quick search domains are skipped).
 pub fn dns_servers(iface: &WgInterface) -> Vec<String> {
     iface
@@ -380,19 +396,27 @@ pub fn dns_servers(iface: &WgInterface) -> Vec<String> {
 /// It has no detour: its own UDP is dialed by the core like any of its sockets, i.e.
 /// on the physical uplink (auto_detect_interface) — never into the tunnel itself or
 /// the TUN adapter.
-pub fn endpoint(t: &WgTunnel, tag: &str) -> Value {
+///
+/// `full`: the client sends internet traffic into the tunnel (direct traffic or the VPN
+/// through it), so the server's peer must accept any destination — whatever AllowedIPs
+/// the file has (a home-network-only `.conf` would otherwise drop it all). What goes
+/// in is decided by the route rules, not by AllowedIPs.
+pub fn endpoint(t: &WgTunnel, tag: &str, full: bool) -> Value {
     let cidrs = |v: &[String]| -> Vec<String> { v.iter().filter_map(|a| bypass_cidr(a)).collect() };
+    let main_peer = t.peers.iter().position(|p| p.endpoint.is_some());
     let peers: Vec<Value> = t
         .peers
         .iter()
-        .map(|p| {
+        .enumerate()
+        .map(|(n, p)| {
+            let allowed = if p.allowed_ips.is_empty() || (full && Some(n) == main_peer) {
+                vec!["0.0.0.0/0".to_string(), "::/0".to_string()]
+            } else {
+                cidrs(&p.allowed_ips)
+            };
             let mut peer = json!({
                 "public_key": p.public_key.trim(),
-                "allowed_ips": if p.allowed_ips.is_empty() {
-                    vec!["0.0.0.0/0".to_string(), "::/0".to_string()]
-                } else {
-                    cidrs(&p.allowed_ips)
-                },
+                "allowed_ips": allowed,
             });
             if let Some((host, port)) = p.endpoint.as_deref().and_then(|e| parse_endpoint(e).ok()) {
                 peer["address"] = json!(host);
@@ -612,7 +636,7 @@ mod tests {
 
     #[test]
     fn endpoint_json_for_sing_box() {
-        let ep = endpoint(&tunnel(&sample()), WG_TAG);
+        let ep = endpoint(&tunnel(&sample()), WG_TAG, false);
         assert_eq!(
             ep,
             json!({
@@ -643,7 +667,7 @@ mod tests {
              [Peer]\nPublicKey = {K2}\nEndpoint = [2001:db8::1]:51820\n\
              [Peer]\nPublicKey = {K3}\nAllowedIPs = 10.1.0.0/24\nPersistentKeepalive = 0\n"
         );
-        let ep = endpoint(&tunnel(&text), "x");
+        let ep = endpoint(&tunnel(&text), "x", false);
         assert_eq!(ep["address"], json!(["10.0.0.2/32"]));
         assert_eq!(ep["listen_port"], 51000);
         assert!(ep.get("mtu").is_none());

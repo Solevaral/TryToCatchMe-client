@@ -84,6 +84,9 @@ pub struct GenOptions {
     /// The tunnel's DNS servers (IPs): direct domains resolve through them when direct
     /// traffic goes through the tunnel.
     pub wg_dns: Vec<String>,
+    /// The networks the tunnel is for (its AllowedIPs without the catch-all ranges,
+    /// e.g. a home LAN): always routed into it, whatever the modes.
+    pub wg_routes: Vec<String>,
     /// Direct traffic (rules/final `direct`) goes through the tunnel; LAN stays local.
     pub direct_via_wg: bool,
     /// The proxy outbounds dial the VPN server through the tunnel (`detour`).
@@ -161,6 +164,7 @@ impl Default for GenOptions {
             tun_bypass_cidrs: Vec::new(),
             wg: None,
             wg_dns: Vec::new(),
+            wg_routes: Vec::new(),
             direct_via_wg: false,
             proxy_via_wg: false,
             provider_list: Vec::new(),
@@ -347,7 +351,12 @@ pub fn generate(opts: &GenOptions) -> Value {
     if has_proxy && opts.block_quic {
         rules.push(json!({ "network": "udp", "port": 443, "action": "reject" }));
     }
-    // 4. Direct through the tunnel: the LAN stays local whatever the routing layer says.
+    // 4. The tunnel's own networks (a home LAN behind it) go into it — before the local
+    //    LAN rule, which would otherwise claim these private ranges.
+    if wg.is_some() && !opts.wg_routes.is_empty() {
+        rules.push(json!({ "ip_cidr": opts.wg_routes, "outbound": wg_tag }));
+    }
+    //    Direct through the tunnel: the LAN stays local whatever the routing layer says.
     if direct_via_wg {
         rules.push(json!({ "ip_is_private": true, "outbound": "direct" }));
     }
@@ -888,7 +897,7 @@ mod tests {
                 json!({ "domain_suffix": ["ru"], "outbound": "direct" }),
                 json!({ "domain_suffix": ["blocked.example"], "outbound": "block" }),
             ],
-            wg: Some(crate::wireguard::endpoint(&t, "wg")),
+            wg: Some(crate::wireguard::endpoint(&t, "wg", direct || vpn_over)),
             wg_dns: crate::wireguard::dns_servers(&t.interface),
             direct_via_wg: direct,
             proxy_via_wg: vpn_over,
@@ -916,6 +925,55 @@ mod tests {
             // The plain direct outbound is never bound or detoured.
             assert_eq!(cfg["outbounds"][0], json!({ "type": "direct", "tag": "direct" }));
         }
+    }
+
+    /// A home-network-only `.conf` (the real case that broke: no internet through it).
+    fn split_tunnel() -> crate::wireguard::WgTunnel {
+        let conf = "[Interface]\nPrivateKey = yAnz5TF+lXXJte14tji3zlMNq+hd2rYUIgJBgB3fBmk=\nAddress = 10.6.0.3/32\nDNS = 1.1.1.1\n\
+                    [Peer]\nPublicKey = xTIBA5rboUvnH4htodjb6e697QjLERt1NAB4mZqp8Dg=\nAllowedIPs = 10.6.0.0/24, 192.168.10.0/24, 192.168.20.0/24\nEndpoint = 46.138.253.10:51820\n";
+        let (interface, peers) = crate::wireguard::parse_conf(conf).unwrap();
+        crate::wireguard::WgTunnel { id: "s".into(), name: "home".into(), interface, peers }
+    }
+
+    #[test]
+    fn split_tunnel_carries_internet_when_a_mode_uses_it() {
+        let t = split_tunnel();
+        // A mode sends internet traffic in: the peer must accept any destination.
+        for (direct, vpn_over) in [(true, false), (false, true), (true, true)] {
+            let cfg = generate(&GenOptions {
+                wg: Some(crate::wireguard::endpoint(&t, "wg", direct || vpn_over)),
+                wg_routes: crate::wireguard::routed_subnets(&t),
+                ..with_wg(direct, vpn_over)
+            });
+            assert_eq!(cfg["endpoints"][0]["peers"][0]["allowed_ips"], json!(["0.0.0.0/0", "::/0"]));
+        }
+        // Tunnel only for the home network: AllowedIPs as in the file.
+        let ep = crate::wireguard::endpoint(&t, "wg", false);
+        assert_eq!(ep["peers"][0]["allowed_ips"], json!(["10.6.0.0/24", "192.168.10.0/24", "192.168.20.0/24"]));
+    }
+
+    #[test]
+    fn tunnel_subnets_go_into_the_tunnel_before_the_lan_rule() {
+        let t = split_tunnel();
+        for direct in [false, true] {
+            let cfg = generate(&GenOptions {
+                wg: Some(crate::wireguard::endpoint(&t, "wg", direct)),
+                wg_routes: crate::wireguard::routed_subnets(&t),
+                ..with_wg(direct, false)
+            });
+            let r = rules(&cfg);
+            let sub = r
+                .iter()
+                .position(|x| x == &json!({ "ip_cidr": ["10.6.0.0/24", "192.168.10.0/24", "192.168.20.0/24"], "outbound": "wg" }))
+                .unwrap();
+            let lan = r.iter().position(|x| x.get("ip_is_private").is_some()).unwrap();
+            assert!(sub < lan, "{r:?}");
+        }
+        // Catch-all AllowedIPs aren't subnets to route: that's the modes' job.
+        assert!(crate::wireguard::routed_subnets(&wg_tunnel()).is_empty());
+        // No tunnel: no such rule.
+        let cfg = generate(&GenOptions { wg: None, wg_routes: vec!["192.168.10.0/24".into()], ..pinned() });
+        assert!(!to_string(&cfg).contains("192.168.10.0/24"));
     }
 
     #[test]

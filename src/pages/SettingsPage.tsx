@@ -89,7 +89,7 @@ export default function SettingsPage() {
     }
     try {
       await patch({ proxy_port: port });
-      setPortMsg({ ok: true, text: "Сохранено — применится при следующем подключении (или «Перезапустить»)" });
+      setPortMsg({ ok: true, text: "Сохранено — применится при следующем подключении (или «Перезапустить VPN»)" });
     } catch (e) {
       setPortMsg({ ok: false, text: String(e) });
     }
@@ -320,7 +320,7 @@ export default function SettingsPage() {
           <div className="muted">Загрузка…</div>
         )}
         <div className="muted" style={{ fontSize: 12, marginTop: 12 }}>
-          Изменения применяются при следующем подключении (или кнопкой «Перезапустить»).
+          Изменения применяются при следующем подключении (или кнопкой «Перезапустить VPN»).
         </div>
       </div>
 

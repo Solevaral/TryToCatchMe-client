@@ -1,8 +1,8 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { useAppStore, type Page } from "./store/appStore";
 import { useLogStore } from "./store/logStore";
-import { coreStatus, traySetState, relaunchAdmin, settingsGet, settingsSet } from "./api/backend";
+import { coreStatus, traySetState, relaunchAdmin, settingsGet, settingsSet, wgRestart, wgStatus, type WgStatus } from "./api/backend";
 import { useConnection } from "./hooks/useConnection";
 import SysProxyLine from "./components/SysProxyLine";
 import ProfilesPage from "./pages/ProfilesPage";
@@ -236,6 +236,31 @@ function Speed() {
 
 function ConnControls() {
   const { connected, busy, toggle, restart } = useConnection();
+  // The built-in WireGuard tunnel runs separately from the VPN: its own restart button,
+  // shown only while it's up (or held off by a watchdog).
+  const [wg, setWg] = useState<WgStatus | null>(null);
+  const [wgBusy, setWgBusy] = useState(false);
+  useEffect(() => {
+    let alive = true;
+    const tick = () => wgStatus().then((s) => alive && setWg(s)).catch(() => {});
+    tick();
+    const t = setInterval(tick, 3000);
+    return () => {
+      alive = false;
+      clearInterval(t);
+    };
+  }, []);
+  async function restartWg() {
+    setWgBusy(true);
+    try {
+      await wgRestart();
+      setWg(await wgStatus());
+    } catch {
+      /* the reason is in the log */
+    } finally {
+      setWgBusy(false);
+    }
+  }
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 10 }}>
       <button
@@ -251,10 +276,21 @@ function ConnControls() {
         style={{ width: "100%", padding: "5px 10px" }}
         disabled={!connected || busy}
         onClick={() => restart().catch(() => {})}
-        title="Перезапустить туннель (применить изменения)"
+        title="Перезапустить VPN (применить изменения)"
       >
-        ↻ Перезапустить
+        ↻ Перезапустить VPN
       </button>
+      {(wg?.running || wg?.suspended) && (
+        <button
+          className="btn"
+          style={{ width: "100%", padding: "5px 10px" }}
+          disabled={wgBusy || busy}
+          onClick={restartWg}
+          title={wg?.suspended ? `Туннель приостановлен: ${wg.suspended}` : "Перезапустить туннель WireGuard (применить изменения)"}
+        >
+          {wgBusy ? "Перезапуск…" : "↻ Перезапустить WG"}
+        </button>
+      )}
     </div>
   );
 }

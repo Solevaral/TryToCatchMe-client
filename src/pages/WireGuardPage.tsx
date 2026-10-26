@@ -32,6 +32,15 @@ function bytes(n: number): string {
   return `${(n / 1024 / 1024 / 1024).toFixed(2)} ГБ`;
 }
 
+/** The networks the tunnel is for (AllowedIPs without the catch-all ranges). */
+const tunnelNets = (t: WgTunnel) =>
+  t.peers
+    .flatMap((p) => p.allowed_ips)
+    .filter((c) => {
+      const prefix = Number(c.split("/")[1] ?? (c.includes(":") ? 128 : 32));
+      return prefix > 1;
+    });
+
 const endpointOf = (t: WgTunnel) => t.peers.find((p) => p.endpoint)?.endpoint ?? "—";
 
 export default function WireGuardPage() {
@@ -122,6 +131,7 @@ export default function WireGuardPage() {
     } catch (e) {
       setCheck(errorText(e));
     }
+    setStatus(await wgStatus().catch(() => null));
   }
 
   if (!store || !settings) {
@@ -281,8 +291,30 @@ export default function WireGuardPage() {
         {running ? (
           <>
             <div>
-              <span style={{ color: "var(--ok)" }}>● Подключён</span> — «{running.name}», сервер {status?.endpoint ?? "—"}
+              {/* "Connected" only once a check through the tunnel answered. */}
+              {!status?.checkable ? (
+                <span style={{ color: "var(--ok)" }}>● Запущен</span>
+              ) : status.alive === true ? (
+                <span style={{ color: "var(--ok)" }}>● Подключён</span>
+              ) : status.alive === false ? (
+                <span style={{ color: "var(--err)" }}>● Нет связи через туннель</span>
+              ) : (
+                <span style={{ color: "var(--warn)" }}>● Проверяю связь…</span>
+              )}{" "}
+              — «{running.name}», сервер {status?.endpoint ?? "—"}
             </div>
+            {status?.checkable && status.checked_ago != null && (
+              <div className="muted" style={{ fontSize: 12, marginTop: 2 }}>
+                {status.alive ? "Ответ через туннель получен" : "Запрос через туннель не прошёл"} {status.checked_ago} с
+                назад (проверка каждые 15 с).
+                {status.alive === false && " Если не пройдёт ~45 с, клиент временно отключит туннель, чтобы не пропал интернет."}
+              </div>
+            )}
+            {!status?.checkable && (
+              <div className="muted" style={{ fontSize: 12, marginTop: 2 }}>
+                Через туннель идут только его сети — связь не проверяется (нечем: интернет идёт мимо него).
+              </div>
+            )}
             <div className="muted" style={{ fontSize: 13, marginTop: 4 }}>
               Сейчас через туннель: {status?.connections ?? 0} соединений, ↑ {bytes(status?.upload ?? 0)} ↓{" "}
               {bytes(status?.download ?? 0)}
@@ -305,6 +337,13 @@ export default function WireGuardPage() {
           Ядро не сообщает время последнего рукопожатия — «Проверить связь» делает запрос через
           туннель: ответ означает, что туннель работает.
         </div>
+        {running && !settings.capture_tun && tunnelNets(running).length > 0 && (
+          <div style={{ fontSize: 12, marginTop: 8, color: "var(--warn)" }}>
+            Сети за туннелем ({tunnelNets(running).join(", ")}) сейчас доступны только программам,
+            которые идут через системный прокси (браузер и т.п.). SSH, RDP, ping и прочие ходят мимо
+            прокси — для них включите перехват «TUN» на вкладке «Маршрутизация».
+          </div>
+        )}
       </div>
 
       <div className="card" style={{ marginBottom: 18 }}>

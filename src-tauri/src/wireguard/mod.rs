@@ -25,6 +25,9 @@ pub struct WgState {
     /// Why the chosen tunnel is held off right now (another copy of it is running, or it
     /// stopped answering). The choice itself stays; connecting it again clears this.
     suspended: Mutex<Option<String>>,
+    /// The last check through the running tunnel: (answered, when). Cleared when the
+    /// core restarts — "connected" in the UI only after a check answered.
+    health: Mutex<Option<(bool, std::time::Instant)>>,
 }
 
 impl WgState {
@@ -104,6 +107,12 @@ impl WgState {
     /// Called by the core on start/stop: which tunnel (if any) it runs with.
     pub fn set_applied(&self, id: Option<String>) {
         *self.applied.lock() = id;
+        *self.health.lock() = None;
+    }
+
+    /// Record a check through the tunnel (the watchdog's or the "check" button's).
+    pub fn set_health(&self, ok: bool) {
+        *self.health.lock() = Some((ok, std::time::Instant::now()));
     }
 
     fn with<R>(&self, app: &AppHandle, f: impl FnOnce(&mut WgStore) -> Result<R, String>) -> Result<R, String> {
@@ -252,6 +261,19 @@ pub struct WgStatus {
     pub download: u64,
     /// Why the chosen tunnel is held off (another copy running / not answering).
     pub suspended: Option<String>,
+    /// The connection can be checked: internet traffic goes through the tunnel (a
+    /// tunnel used only for its own networks has nothing to test against).
+    pub checkable: bool,
+    /// The last check: answered or not, and how many seconds ago. `None`: not yet.
+    pub alive: Option<bool>,
+    pub checked_ago: Option<u64>,
+}
+
+/// Internet traffic goes through the running tunnel (the modes) — so a request through
+/// it to a test URL proves it works.
+pub fn internet_through_tunnel(app: &AppHandle) -> bool {
+    let s = app.state::<SettingsStore>().get();
+    s.wg_direct_via_tunnel || (s.wg_vpn_over_tunnel && app.state::<CoreState>().vpn_connected())
 }
 
 #[tauri::command]
@@ -282,7 +304,11 @@ pub async fn wg_status(app: AppHandle) -> WgStatus {
         }
     }
     let suspended = state.suspended.lock().clone();
-    WgStatus { running, endpoint, connections, upload, download, suspended }
+    let checkable = running.is_some() && internet_through_tunnel(&app);
+    let health = if running.is_some() { *state.health.lock() } else { None };
+    let alive = health.map(|(ok, _)| ok);
+    let checked_ago = health.map(|(_, at)| at.elapsed().as_secs());
+    WgStatus { running, endpoint, connections, upload, download, suspended, checkable, alive, checked_ago }
 }
 
 /// Round-trip time of a request through the tunnel (proves the handshake works).
@@ -291,13 +317,17 @@ pub async fn wg_check(app: AppHandle) -> Result<u64, String> {
     if app.state::<WgState>().applied.lock().is_none() || !app.state::<CoreState>().status().running {
         return Err("туннель не подключён".into());
     }
-    tauri::async_runtime::spawn_blocking(|| {
+    if !internet_through_tunnel(&app) {
+        return Err("через туннель сейчас идут только его сети (режим «прямой трафик — через провайдера») — проверить связь нечем".into());
+    }
+    let r = tauri::async_runtime::spawn_blocking(|| {
         crate::diag::clash_delay_via(wg::WG_TAG, "http://www.gstatic.com/generate_204", 5000)
     })
     .await
     .ok()
-    .flatten()
-    .ok_or_else(|| "нет ответа через туннель (сервер недоступен, неверные ключи или Endpoint)".into())
+    .flatten();
+    app.state::<WgState>().set_health(r.is_some());
+    r.ok_or_else(|| "нет ответа через туннель (сервер недоступен, неверные ключи или Endpoint)".into())
 }
 
 #[tauri::command]

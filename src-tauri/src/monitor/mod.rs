@@ -125,14 +125,15 @@ fn watch_tunnel(app: &AppHandle, strikes: &mut Strikes) {
     }
     // Only when internet traffic goes into the tunnel: a home-network-only tunnel can't
     // reach the test URL by design.
-    let s = app.state::<SettingsStore>().get();
-    let full = s.wg_direct_via_tunnel || (s.wg_vpn_over_tunnel && app.state::<CoreState>().vpn_connected());
-    if !full {
+    if !crate::wireguard::internet_through_tunnel(app) {
         strikes.wg = 0;
         return;
     }
     let tag = ttcm_core::wireguard::WG_TAG;
-    if crate::diag::clash_delay_via(tag, "http://www.gstatic.com/generate_204", 5000).is_some() {
+    let ok = crate::diag::clash_delay_via(tag, "http://www.gstatic.com/generate_204", 5000).is_some();
+    // The UI shows "connected" only from a check that answered.
+    wg.set_health(ok);
+    if ok {
         strikes.wg = 0;
         return;
     }
@@ -190,6 +191,11 @@ fn run_loop(app: AppHandle, stop: Arc<AtomicBool>) {
             if watch_hang(&app, &mut strikes) {
                 continue;
             }
+        }
+        // The tunnel is checked right after a (re)start too, so its status is known
+        // within seconds instead of after the first full interval.
+        if tick == 5 {
+            watch_tunnel(&app, &mut strikes);
         }
         if tick % CHECK_INTERVAL_SECS != 0 {
             continue;

@@ -109,6 +109,11 @@ export interface WgStatus {
   download: number;
   /** Why the chosen tunnel is held off right now (another copy running, not answering). */
   suspended: string | null;
+  /** Internet traffic goes through the tunnel, so its connection can be checked. */
+  checkable: boolean;
+  /** The last check through the tunnel answered (null: not checked yet). */
+  alive: boolean | null;
+  checked_ago: number | null;
 }
 
 export interface WgMigration {

@@ -11,7 +11,6 @@ import {
   wgMigrate,
   wgMigrationOffer,
   wgRemove,
-  wgRestart,
   wgSetActive,
   wgStatus,
   wgUpdate,
@@ -86,7 +85,7 @@ export default function WireGuardPage() {
   async function patch(p: Partial<Settings>) {
     if (!settings) return;
     const next = { ...settings, ...p };
-    await run(() => settingsSet(next), store?.active ? "Сохранено — нажмите «Перезапустить WireGuard», чтобы применить" : "Сохранено — применится при подключении");
+    await run(() => settingsSet(next), store?.active ? "Сохранено — нажмите «↻ Перезапустить WG» слева, чтобы применить" : "Сохранено — применится при подключении");
   }
 
   async function importText(text: string, name: string) {
@@ -109,13 +108,6 @@ export default function WireGuardPage() {
   async function activate(id: string | null) {
     setBusy(true);
     await run(() => wgSetActive(id));
-    setBusy(false);
-  }
-
-  // Apply edited settings (tunnel, modes, "not through the tunnel") to the running tunnel.
-  async function restartTunnel() {
-    setBusy(true);
-    await run(wgRestart, "WireGuard перезапущен — настройки применены");
     setBusy(false);
   }
 
@@ -219,14 +211,9 @@ export default function WireGuardPage() {
                   </div>
                 </div>
                 {isActive ? (
-                  <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                    <button className="btn primary" disabled={busy} onClick={restartTunnel} title="Применить изменённые настройки туннеля, режимов и списка «Не через туннель»">
-                      Перезапустить WireGuard
-                    </button>
-                    <button className="btn" disabled={busy} onClick={() => activate(null)}>
-                      Отключить
-                    </button>
-                  </div>
+                  <button className="btn" disabled={busy} onClick={() => activate(null)}>
+                    Отключить
+                  </button>
                 ) : (
                   <button className="btn" disabled={busy} onClick={() => activate(t.id)}>
                     Подключить
@@ -309,7 +296,7 @@ export default function WireGuardPage() {
           </>
         ) : active ? (
           <div className="muted">
-            «{active.name}» выбран, но не подключён — нажмите «Перезапустить WireGuard».
+            «{active.name}» выбран, но не подключён — нажмите «↻ Перезапустить WG» слева.
           </div>
         ) : (
           <div className="muted">Встроенный WireGuard выключен.</div>
@@ -495,7 +482,7 @@ function TunnelEditor(props: { tunnel: WgTunnel; onClose: () => void; onSaved: (
         </button>
       </div>
       <div className="muted" style={{ fontSize: 12, marginTop: 6 }}>
-        Чтобы применить к работающему туннелю — «Перезапустить WireGuard».
+        Чтобы применить к работающему туннелю — «↻ Перезапустить WG» слева.
       </div>
     </div>
   );

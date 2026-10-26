@@ -234,6 +234,17 @@ impl CoreState {
                 false
             }
         });
+        // TUN captures the other VPN's own packets to its server too; sent to `direct`,
+        // now bound to that VPN's tunnel, they'd loop back into it and kill the tunnel.
+        // A "direct" rule doesn't help (direct is the bound outbound), so only warn.
+        if tun {
+            if let Some(iface) = &direct_interface {
+                app_error(
+                    app,
+                    format!("TUN + прямой трафик через «{iface}»: пакеты самого VPN-туннеля «{iface}» к его серверу тоже попадут в TUN и уйдут обратно в туннель — он может оборваться. Выведите адрес сервера этого VPN из TUN (исключите его маршрут) или используйте режим «Системный прокси»."),
+                );
+            }
+        }
 
         ensure_port_free(CLASH_CONTROLLER, "Clash API")?;
         ensure_port_free(&format!("{MIXED_LISTEN}:{port}"), "локальный прокси")?;

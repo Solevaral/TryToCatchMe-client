@@ -563,6 +563,31 @@ mod tests {
         expected["outbounds"][0]["bind_interface"] = json!("all-rodoro-home");
         assert_eq!(cfg, expected);
     }
+
+    #[test]
+    fn direct_interface_keeps_reject_rules_and_proxy() {
+        let iface = Some("all-rodoro-home".to_string());
+        for tun in [false, true] {
+            let base = GenOptions { block_quic: true, tun, ..only_youtube() };
+            let before = generate(&base);
+            let after = generate(&GenOptions { direct_interface: iface.clone(), ..base });
+            let rejects = |cfg: &Value| -> Vec<Value> {
+                cfg["route"]["rules"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter(|r| r["action"] == "reject")
+                    .cloned()
+                    .collect()
+            };
+            // QUIC block + the "blocked" service.
+            assert_eq!(rejects(&before).len(), 2);
+            assert_eq!(rejects(&after), rejects(&before));
+            assert_eq!(after["route"]["rules"], before["route"]["rules"]);
+            assert_eq!(after["outbounds"][1], proxy());
+            assert_eq!(after["route"]["auto_detect_interface"], true);
+        }
+    }
 }
 
 pub fn to_string(cfg: &Value) -> String {

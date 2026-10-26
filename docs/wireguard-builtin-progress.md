@@ -1,0 +1,49 @@
+# Встроенный WireGuard (1.4.0-dev) — прогресс
+
+Ветка: `feature/wireguard-builtin` (от `main` после 1.3.91, коммит `3d8b1c0`). Не запушена.
+
+## Состояние
+
+**Готово, закоммичено, тесты зелёные (`cargo test -p ttcm-core`: 82), `cargo check` и `npm run build` чистые.**
+Живая проверка с реальным туннелем пользователя — ещё НЕ проводилась.
+
+| Коммит | Что |
+|---|---|
+| `e457832` | `ttcm-core`: парсер/экспорт `.conf`, валидация, endpoint sing-box, режимы в генераторе, список «через провайдера», миграция |
+| `fa1f836` | приложение: хранилище `wireguard.json`, команды Tauri, вкладка «WireGuard», статус, миграция |
+
+## Где что лежит
+
+- `src-tauri/ttcm-core/src/wireguard.rs` — модель (`WgTunnel`, `WgStore`), `parse_conf`, `validate`, `to_conf`, `endpoint`, `dns_servers`, `migration_offer`, тесты.
+- `src-tauri/ttcm-core/src/config.rs` — `GenOptions { wg, wg_dns, direct_via_wg, proxy_via_wg, provider_list }`, `provider_entry` / `split_provider_list`, тесты `wg_*`, `direct_via_wg_*`, `vpn_over_wg_*`, `provider_*`.
+- `src-tauri/src/wireguard/mod.rs` — `WgState` (load/save, 0600 на Linux), команды `wg_*`, статус через Clash API.
+- `src-tauri/src/core/mod.rs` — подстановка активного туннеля в конфиг, предупреждение о старых настройках, `set_applied`.
+- `src-tauri/src/settings/mod.rs` — `wg_direct_via_tunnel` (по умолчанию true), `wg_vpn_over_tunnel`, `provider_list`.
+- `src/pages/WireGuardPage.tsx`, `src/components/ListEditor.tsx`, `src/api/backend.ts` (`wg*`).
+
+## Решения
+
+- Туннель — userspace endpoint sing-box 1.14 (`endpoints[]`, тег `wg`, `system: false`), без detour/bind: сервер туннеля ядро набирает само через физический адаптер (`auto_detect_interface`) → петли в TUN нет.
+- «Прямой через туннель»: все `direct` в правилах/`final` → `wg`, кроме правила `ip_is_private` + явное правило LAN → `direct` перед правилами маршрутизации. Домены прямых сайтов — через DNS туннеля (`dns-wg`, detour `wg`), если в `.conf` есть DNS-IP. `default_domain_resolver` остаётся `dns-direct`.
+- «VPN поверх туннеля»: `detour: "wg"` у `proxy` и всех `via-*`.
+- «Через провайдера»: `domain_suffix` / `ip_cidr` → `direct` (или `direct-physical`, если `direct` привязан старой настройкой интерфейса); DNS этих доменов — `dns-direct`. Работает и без туннеля.
+- Активный встроенный туннель отключает старые настройки 1.3.8–1.3.91 (интерфейс, «VPN через интерфейс», исключения TUN) — в генераторе и с предупреждением в логе; вкладка предлагает миграцию.
+- Подключение туннеля = старт/перезапуск ядра (туннель живёт внутри него).
+- Ключи: открытым текстом в `wireguard.json` (защищённого хранилища в проекте нет); в `config.json` ключ всё равно нужен ядру.
+- Без туннелей и с пустым списком конфиг побайтово как в 1.3.91 (проверено раздельными сборками v1.3.91 и ветки — общий `CARGO_TARGET_DIR` даёт ложные совпадения!).
+
+## Известные ограничения
+
+- sing-box не отдаёт время последнего рукопожатия и счётчики интерфейса: статус = соединения/трафик через `wg` из `/connections` + «Проверить связь» (`/proxies/wg/delay`).
+- Комментарии `.conf` при экспорте теряются (значения и неизвестные ключи — сохраняются).
+- В форме правки — только первый пир; остальные — через «как текст .conf».
+- Нельзя одновременно держать тот же туннель в программе WireGuard (один ключ).
+
+## Дальше
+
+1. Живая проверка с пользователем (импорт его `.conf`, выключить внешний WireGuard, TUN + Rule, Warframe, GitHub, ChatGPT через VPN, «Проверить связь»).
+2. Выпуск: спросить пользователя — pre-release `1.4.0-dev.N` на GitHub или локальная сборка. Стабильная 1.4.0 — только по его явному «да».
+
+## Не входит (отложено пользователем)
+
+Список «программы через провайдера», импорт по QR, AmneziaWG, проверка туннеля в «Диагностике», поведение при падении туннеля.

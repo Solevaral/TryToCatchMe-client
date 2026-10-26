@@ -49,6 +49,8 @@ export interface Settings {
   verbose_logs: boolean;
   /** Network interface for direct traffic (e.g. another VPN's tunnel); null = automatic. */
   direct_interface: string | null;
+  /** Reach the VPN server through `direct_interface` too (ignored while it's automatic). */
+  proxy_via_direct_interface: boolean;
 }
 
 /** Names of the system's active network interfaces. */

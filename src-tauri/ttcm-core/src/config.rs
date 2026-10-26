@@ -62,9 +62,14 @@ pub struct GenOptions {
     /// Network interface the `direct` outbound is bound to (`bind_interface`), e.g. the
     /// adapter of another full-tunnel VPN (WireGuard), so direct traffic goes through it
     /// instead of the physical uplink `auto_detect_interface` picks. The `proxy`
-    /// outbound is left alone: the server is still reached over the uplink.
+    /// outbound is left alone (the server is still reached over the uplink) unless
+    /// `proxy_via_direct_interface` is on.
     /// `None` => no binding, the config is exactly as without this option.
     pub direct_interface: Option<String>,
+    /// Also bind the proxy outbounds (`proxy` and the pinned `via-*` ones) to
+    /// `direct_interface`: the VPN server itself is then reached through the other VPN
+    /// (helps when the local ISP blocks the server). No effect without `direct_interface`.
+    pub proxy_via_direct_interface: bool,
 }
 
 impl Default for GenOptions {
@@ -83,6 +88,7 @@ impl Default for GenOptions {
             direct_dns: Vec::new(),
             tun_ipv6: true,
             direct_interface: None,
+            proxy_via_direct_interface: false,
         }
     }
 }
@@ -157,6 +163,11 @@ pub fn generate(opts: &GenOptions) -> Value {
     if let Some(proxy) = &opts.proxy_outbound {
         outbounds.push(proxy.clone());
         outbounds.extend(opts.extra_outbounds.iter().cloned());
+        if let (Some(iface), true) = (&opts.direct_interface, opts.proxy_via_direct_interface) {
+            for o in &mut outbounds[1..] {
+                o["bind_interface"] = json!(iface);
+            }
+        }
     }
     let extra_tags: Vec<String> = if has_proxy {
         opts.extra_outbounds
@@ -587,6 +598,58 @@ mod tests {
             assert_eq!(after["outbounds"][1], proxy());
             assert_eq!(after["route"]["auto_detect_interface"], true);
         }
+    }
+
+    fn pinned() -> GenOptions {
+        GenOptions {
+            extra_outbounds: vec![json!({ "type": "trojan", "tag": "via-p2", "server": "b.com", "server_port": 443 })],
+            block_quic: true,
+            ..only_youtube()
+        }
+    }
+
+    #[test]
+    fn proxy_via_interface_off_changes_nothing() {
+        let base = generate(&GenOptions { direct_interface: Some("wg0".into()), ..pinned() });
+        let cfg = generate(&GenOptions {
+            direct_interface: Some("wg0".into()),
+            proxy_via_direct_interface: false,
+            ..pinned()
+        });
+        assert_eq!(cfg, base);
+        assert!(cfg["outbounds"].as_array().unwrap()[1..].iter().all(|o| o.get("bind_interface").is_none()));
+    }
+
+    #[test]
+    fn proxy_via_interface_binds_all_proxy_outbounds() {
+        let base = generate(&GenOptions { direct_interface: Some("wg0".into()), ..pinned() });
+        let cfg = generate(&GenOptions {
+            direct_interface: Some("wg0".into()),
+            proxy_via_direct_interface: true,
+            ..pinned()
+        });
+        let outbounds = cfg["outbounds"].as_array().unwrap();
+        assert_eq!(outbounds.len(), 3);
+        assert!(outbounds.iter().all(|o| o["bind_interface"] == "wg0"));
+        // Only the outbounds change: route (incl. reject rules), DNS, inbounds stay as is.
+        let mut expected = base;
+        expected["outbounds"][1]["bind_interface"] = json!("wg0");
+        expected["outbounds"][2]["bind_interface"] = json!("wg0");
+        assert_eq!(cfg, expected);
+    }
+
+    #[test]
+    fn proxy_via_interface_needs_direct_interface() {
+        let base = generate(&pinned());
+        let cfg = generate(&GenOptions { proxy_via_direct_interface: true, ..pinned() });
+        assert_eq!(cfg, base);
+        // Without a profile there's nothing to bind either.
+        let cfg = generate(&GenOptions {
+            direct_interface: Some("wg0".into()),
+            proxy_via_direct_interface: true,
+            ..GenOptions::default()
+        });
+        assert_eq!(cfg["outbounds"], json!([{ "type": "direct", "tag": "direct", "bind_interface": "wg0" }]));
     }
 }
 

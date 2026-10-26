@@ -45,6 +45,10 @@ pub struct Settings {
     /// outbound), e.g. another VPN's full-tunnel adapter. `None` => automatic, as before.
     #[serde(default)]
     pub direct_interface: Option<String>,
+    /// Reach the VPN server through `direct_interface` too (when the local ISP blocks
+    /// the server). Ignored while `direct_interface` is automatic.
+    #[serde(default)]
+    pub proxy_via_direct_interface: bool,
 }
 
 impl Default for Settings {
@@ -58,6 +62,7 @@ impl Default for Settings {
             proxy_port: default_proxy_port(),
             verbose_logs: false,
             direct_interface: None,
+            proxy_via_direct_interface: false,
         }
     }
 }

@@ -222,15 +222,18 @@ impl CoreState {
         // Direct traffic through a chosen interface (e.g. another VPN's full tunnel).
         // An interface that isn't up right now falls back to automatic: binding to a
         // missing interface would break all direct traffic.
+        // With `proxy_via_direct_interface` the VPN server is reached through it as well.
+        let proxy_via = settings.proxy_via_direct_interface && proxy_outbound.is_some();
         let direct_interface = settings.direct_interface.clone().filter(|iface| {
             if crate::platform::network_interfaces().iter().any(|n| n == iface) {
                 app_log(app, format!("Прямой трафик через интерфейс: {iface}"));
+                if proxy_via {
+                    app_log(app, format!("Подключение к VPN-серверу тоже через интерфейс: {iface}"));
+                }
                 true
             } else {
-                app_error(
-                    app,
-                    format!("Интерфейс «{iface}» для прямого трафика не найден — прямой трафик пойдёт как обычно (Авто)"),
-                );
+                let what = if proxy_via { "прямой трафик и подключение к VPN-серверу пойдут" } else { "прямой трафик пойдёт" };
+                app_error(app, format!("Интерфейс «{iface}» не найден — {what} как обычно (Авто)"));
                 false
             }
         });
@@ -268,6 +271,7 @@ impl CoreState {
             direct_dns: direct_dns.clone(),
             tun_ipv6,
             direct_interface: direct_interface.clone(),
+            proxy_via_direct_interface: settings.proxy_via_direct_interface,
             // `info` logs every connection — real CPU cost in TUN mode.
             log_level: if settings.verbose_logs { "info".into() } else { "warn".into() },
         };

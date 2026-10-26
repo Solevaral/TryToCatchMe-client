@@ -202,6 +202,29 @@ export default function SettingsPage() {
               WireGuard). Трафик через VPN-сервер это не затрагивает. Если выбранного
               интерфейса при подключении нет, прямой трафик пойдёт как в режиме «Авто».
             </div>
+            <label
+              style={{
+                display: "flex",
+                gap: 10,
+                alignItems: "flex-start",
+                marginTop: 12,
+                opacity: settings.direct_interface ? 1 : 0.5,
+              }}
+            >
+              <input
+                type="checkbox"
+                checked={settings.proxy_via_direct_interface}
+                disabled={!settings.direct_interface}
+                onChange={(e) => patch({ proxy_via_direct_interface: e.target.checked })}
+              />
+              <span>
+                VPN-трафик тоже через этот интерфейс
+                <div className="muted" style={{ fontSize: 12 }}>
+                  Подключение к VPN-серверу тоже идёт через выбранный интерфейс. Помогает, если
+                  ваш провайдер блокирует сам VPN-сервер. Медленнее (лишний участок).
+                </div>
+              </span>
+            </label>
             {settings.capture_tun && settings.direct_interface && (
               <div style={{ fontSize: 12, marginTop: 8, color: "var(--warn)" }}>
                 Включён TUN: он перехватит и пакеты самого VPN «{settings.direct_interface}» к

@@ -98,6 +98,11 @@ pub struct GenOptions {
     /// IP ranges — see `provider_from_services`).
     pub provider_service_domains: Vec<String>,
     pub provider_service_cidrs: Vec<String>,
+    /// IPv4 only, everywhere: DNS answers A records only (TUN apps, the tunnel, direct
+    /// sites), and VPN destinations are resolved here and handed to the server as IPv4
+    /// addresses — it can no longer pick IPv6 for some connections and IPv4 for others,
+    /// so sites like Google see one IP per session instead of two.
+    pub ipv4_only: bool,
 }
 
 /// A "through the ISP" entry: an IP/CIDR, or a domain (also pasted as a URL or
@@ -194,6 +199,7 @@ impl Default for GenOptions {
             provider_list: Vec::new(),
             provider_service_domains: Vec::new(),
             provider_service_cidrs: Vec::new(),
+            ipv4_only: false,
         }
     }
 }
@@ -392,6 +398,11 @@ pub fn generate(opts: &GenOptions) -> Value {
     if opts.tun {
         rules.push(json!({ "protocol": "dns", "action": "hijack-dns" }));
     }
+    // IPv4 only: resolve here, before any rule sends the connection on (domain rules
+    // still match: the sniffed name is kept).
+    if opts.ipv4_only && has_proxy {
+        rules.push(json!({ "action": "resolve", "strategy": "ipv4_only" }));
+    }
     // The app's own geo-list downloads always go through the VPN (the ISP often
     // blocks raw.githubusercontent.com), regardless of the routing mode.
     if has_proxy {
@@ -572,10 +583,11 @@ pub fn generate(opts: &GenOptions) -> Value {
     // Direct traffic through a tunnel without an IPv6 address: an AAAA answer would send
     // the connection into the tunnel over IPv6, which it can't carry ("missing IPv6
     // local address") — dual-stack sites (Cloudflare & co.) just failed. A records only.
+    // The same when the user asked for IPv4 only (the system's own lookups in TUN too).
     let wg_has_ipv6 = wg.is_some_and(|ep| {
         ep["address"].as_array().is_some_and(|a| a.iter().any(|x| x.as_str().is_some_and(|s| s.contains(':'))))
     });
-    if direct_via_wg && !wg_has_ipv6 {
+    if opts.ipv4_only || (direct_via_wg && !wg_has_ipv6) {
         cfg["dns"]["strategy"] = json!("ipv4_only");
     }
 
@@ -1256,6 +1268,33 @@ Ethernet|not-an-ip|x"));
         assert_eq!(parse("localhost"), "-");
         assert_eq!(parse("a..b"), "-");
         assert_eq!(parse(""), "-");
+    }
+
+    #[test]
+    fn ipv4_only_resolves_locally_after_sniff() {
+        for tun in [false, true] {
+            let cfg = generate(&GenOptions { ipv4_only: true, tun, ..only_youtube() });
+            let r = rules(&cfg);
+            let resolve = r.iter().position(|x| x == &json!({ "action": "resolve", "strategy": "ipv4_only" })).unwrap();
+            let sniff = r.iter().position(|x| x["action"] == "sniff").unwrap();
+            let first_route = r.iter().position(|x| x.get("outbound").is_some()).unwrap();
+            assert!(sniff < resolve && resolve < first_route, "{r:?}");
+            if tun {
+                assert_eq!(r[1]["action"], "hijack-dns");
+            }
+            assert_eq!(cfg["dns"]["strategy"], "ipv4_only");
+            // Only the resolve rule and the DNS strategy change.
+            let mut plain = generate(&GenOptions { tun, ..only_youtube() });
+            plain["route"]["rules"].as_array_mut().unwrap().insert(resolve, r[resolve].clone());
+            plain["dns"]["strategy"] = json!("ipv4_only");
+            assert_eq!(cfg, plain);
+        }
+        // Without a VPN profile: DNS is still IPv4-only, but there's no server to hand
+        // resolved addresses to — no resolve rule.
+        let cfg = generate(&GenOptions { ipv4_only: true, ..GenOptions::default() });
+        let mut plain = generate(&GenOptions::default());
+        plain["dns"]["strategy"] = json!("ipv4_only");
+        assert_eq!(cfg, plain);
     }
 
     #[test]

@@ -63,6 +63,8 @@ export interface Settings {
   wg_vpn_over_tunnel: boolean;
   /** Domains / IPs that go through the ISP, past the tunnel and the VPN. */
   provider_list: string[];
+  /** Services (catalog ids) that go through the ISP, past the tunnel and the VPN. */
+  provider_services: string[];
   /** The migration to the built-in tunnel was accepted. */
   wg_migrated: boolean;
 }

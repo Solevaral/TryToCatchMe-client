@@ -94,6 +94,10 @@ pub struct GenOptions {
     /// "Through the ISP": domains (and their subdomains) / IPs / CIDRs that go straight
     /// out of the physical uplink — past the tunnel and past the VPN.
     pub provider_list: Vec<String>,
+    /// The same for services picked from the catalog (their domains, as suffixes, and
+    /// IP ranges — see `provider_from_services`).
+    pub provider_service_domains: Vec<String>,
+    pub provider_service_cidrs: Vec<String>,
 }
 
 /// A "through the ISP" entry: an IP/CIDR, or a domain (also pasted as a URL or
@@ -124,6 +128,26 @@ pub fn split_provider_list(list: &[String]) -> (Vec<String>, Vec<String>) {
             Some(ProviderEntry::Domain(d)) if !domains.contains(&d) => domains.push(d),
             Some(ProviderEntry::Cidr(c)) if !cidrs.contains(&c) => cidrs.push(c),
             _ => {}
+        }
+    }
+    (domains, cidrs)
+}
+
+/// Domains (suffixes, as the catalog has them — single labels like `google` included)
+/// and CIDRs of the picked services, without duplicates; unknown ids are skipped.
+pub fn provider_from_services(catalog: &[crate::routing::Service], ids: &[String]) -> (Vec<String>, Vec<String>) {
+    let (mut domains, mut cidrs): (Vec<String>, Vec<String>) = (Vec::new(), Vec::new());
+    for svc in catalog.iter().filter(|s| ids.contains(&s.id)) {
+        for d in &svc.domains {
+            let d = d.trim().trim_start_matches("*.").trim_start_matches('.').to_lowercase();
+            if !d.is_empty() && !domains.contains(&d) {
+                domains.push(d);
+            }
+        }
+        for c in svc.ip_cidrs.iter().filter_map(|c| bypass_cidr(c)) {
+            if !cidrs.contains(&c) {
+                cidrs.push(c);
+            }
         }
     }
     (domains, cidrs)
@@ -168,6 +192,8 @@ impl Default for GenOptions {
             direct_via_wg: false,
             proxy_via_wg: false,
             provider_list: Vec::new(),
+            provider_service_domains: Vec::new(),
+            provider_service_cidrs: Vec::new(),
         }
     }
 }
@@ -310,7 +336,17 @@ pub fn generate(opts: &GenOptions) -> Value {
     } else {
         (user_rules, final_tag)
     };
-    let (provider_domains, provider_cidrs) = split_provider_list(&opts.provider_list);
+    let (mut provider_domains, mut provider_cidrs) = split_provider_list(&opts.provider_list);
+    for d in &opts.provider_service_domains {
+        if !provider_domains.contains(d) {
+            provider_domains.push(d.clone());
+        }
+    }
+    for c in &opts.provider_service_cidrs {
+        if !provider_cidrs.contains(c) {
+            provider_cidrs.push(c.clone());
+        }
+    }
     let has_provider = !provider_domains.is_empty() || !provider_cidrs.is_empty();
 
     // Rule order matters:
@@ -1109,6 +1145,40 @@ mod tests {
         let cfg = generate(&GenOptions { provider_list: vec!["github.com".into()], ..pinned() });
         assert!(rules(&cfg).iter().any(|x| x == &json!({ "domain_suffix": ["github.com"], "outbound": "direct" })));
         assert!(cfg["outbounds"].as_array().unwrap().iter().all(|o| o["tag"] != "direct-physical"));
+    }
+
+    #[test]
+    fn provider_services_expand_to_domains_and_ranges() {
+        let svc = |id: &str, domains: &[&str], cidrs: &[&str]| crate::routing::Service {
+            id: id.into(),
+            name: id.into(),
+            icon: String::new(),
+            domains: domains.iter().map(|s| s.to_string()).collect(),
+            ip_cidrs: cidrs.iter().map(|s| s.to_string()).collect(),
+            geosite: None,
+        };
+        let catalog = vec![
+            svc("discord", &["discord.com", "Discord.gg", "*.discordapp.net"], &["162.159.128.0/19", "bad"]),
+            svc("google", &["google.com", "google", "discord.com"], &[]),
+            svc("telegram", &["t.me"], &["91.108.4.0/22"]),
+        ];
+        let ids = vec!["discord".to_string(), "google".to_string(), "gone".to_string()];
+        let (d, c) = provider_from_services(&catalog, &ids);
+        // Single-label TLDs from the catalog are kept; duplicates and bad ranges dropped.
+        assert_eq!(d, ["discord.com", "discord.gg", "discordapp.net", "google.com", "google"]);
+        assert_eq!(c, ["162.159.128.0/19"]);
+        // Merged with the typed list, in one rule each, before the routing rules.
+        let cfg = generate(&GenOptions {
+            provider_list: vec!["warframe.com".into(), "discord.com".into()],
+            provider_service_domains: d,
+            provider_service_cidrs: c,
+            ..with_wg(true, false)
+        });
+        let r = rules(&cfg);
+        assert!(r.contains(&json!({ "domain_suffix": ["warframe.com", "discord.com", "discord.gg", "discordapp.net", "google.com", "google"], "outbound": "direct" })));
+        assert!(r.contains(&json!({ "ip_cidr": ["162.159.128.0/19"], "outbound": "direct" })));
+        // Nothing picked: no change.
+        assert_eq!(provider_from_services(&catalog, &[]), (Vec::<String>::new(), Vec::<String>::new()));
     }
 
     #[test]

@@ -288,8 +288,24 @@ impl CoreState {
                 );
             }
         }
-        if !settings.provider_list.is_empty() {
-            app_log(app, format!("Через провайдера: {}", settings.provider_list.join(", ")));
+        // "Not through the tunnel": services picked from the catalog + the typed list.
+        let catalog = app.state::<RoutingStore>().snapshot().catalog;
+        let (provider_service_domains, provider_service_cidrs) =
+            config::provider_from_services(&catalog, &settings.provider_services);
+        if !settings.provider_list.is_empty() || !settings.provider_services.is_empty() {
+            let names: Vec<&str> = catalog
+                .iter()
+                .filter(|s| settings.provider_services.contains(&s.id))
+                .map(|s| s.name.as_str())
+                .collect();
+            app_log(
+                app,
+                format!(
+                    "Не через туннель (напрямую через провайдера): сервисы [{}], сайты [{}]",
+                    names.join(", "),
+                    settings.provider_list.join(", ")
+                ),
+            );
         }
         // Direct traffic through a chosen interface (e.g. another VPN's full tunnel).
         // An interface that isn't up right now falls back to automatic: binding to a
@@ -374,6 +390,8 @@ impl CoreState {
             direct_via_wg: settings.wg_direct_via_tunnel,
             proxy_via_wg: settings.wg_vpn_over_tunnel,
             provider_list: settings.provider_list.clone(),
+            provider_service_domains: provider_service_domains.clone(),
+            provider_service_cidrs: provider_service_cidrs.clone(),
             // `info` logs every connection — real CPU cost in TUN mode.
             log_level: if settings.verbose_logs { "info".into() } else { "warn".into() },
         };

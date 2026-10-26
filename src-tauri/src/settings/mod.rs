@@ -66,6 +66,9 @@ pub struct Settings {
     /// "Through the ISP": domains / IPs that skip both the tunnel and the VPN.
     #[serde(default)]
     pub provider_list: Vec<String>,
+    /// The same for services picked from the catalog (ids).
+    #[serde(default)]
+    pub provider_services: Vec<String>,
     /// The migration to the built-in tunnel was accepted (the old interface options are
     /// kept for rollbacks, just not offered again).
     #[serde(default)]
@@ -99,6 +102,7 @@ impl Default for Settings {
             wg_direct_via_tunnel: true,
             wg_vpn_over_tunnel: false,
             provider_list: Vec::new(),
+            provider_services: Vec::new(),
             wg_migrated: false,
         }
     }

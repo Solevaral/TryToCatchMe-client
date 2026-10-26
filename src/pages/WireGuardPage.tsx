@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import {
+  routingGet,
   settingsGet,
   settingsSet,
   wgCheck,
@@ -14,6 +15,7 @@ import {
   wgStatus,
   wgUpdate,
   wgUpdateConf,
+  type Service,
   type Settings,
   type WgMigration,
   type WgStatus,
@@ -45,12 +47,14 @@ export default function WireGuardPage() {
   const [editing, setEditing] = useState<WgTunnel | null>(null);
   const [exported, setExported] = useState<{ name: string; text: string } | null>(null);
   const [check, setCheck] = useState<string>("");
+  const [catalog, setCatalog] = useState<Service[]>([]);
   const fileInput = useRef<HTMLInputElement>(null);
 
   const reload = useCallback(async () => {
     setStore(await wgList());
     setSettings(await settingsGet());
     setMigration(await wgMigrationOffer());
+    setCatalog((await routingGet()).catalog);
   }, []);
 
   useEffect(() => {
@@ -341,10 +345,38 @@ export default function WireGuardPage() {
       </div>
 
       <div className="card" style={{ marginBottom: 18 }}>
-        <div style={{ fontWeight: 600, marginBottom: 6 }}>Через провайдера</div>
+        <div style={{ fontWeight: 600, marginBottom: 6 }}>Не через туннель</div>
         <div className="muted" style={{ fontSize: 12, marginBottom: 8 }}>
-          Эти сайты идут напрямую через провайдера — мимо туннеля и мимо VPN (например, игровые
-          серверы, которым важен пинг). Домен включает свои поддомены. Работает и без туннеля.
+          Выбранные сервисы и сайты идут напрямую через провайдера — мимо туннеля и мимо VPN
+          (например, Discord через zapret или игровые серверы, которым важен пинг). Домен включает
+          свои поддомены. Работает и без туннеля.
+        </div>
+        <div style={{ fontSize: 13, marginBottom: 4 }}>Сервисы</div>
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 12 }}>
+          {catalog.map((svc) => {
+            const on = settings.provider_services.includes(svc.id);
+            return (
+              <label
+                key={svc.id}
+                style={{ ...fieldStyle, display: "flex", gap: 6, alignItems: "center", fontSize: 13, cursor: "pointer", borderColor: on ? "var(--ok)" : "var(--border)" }}
+              >
+                <input
+                  type="checkbox"
+                  checked={on}
+                  onChange={() =>
+                    patch({
+                      provider_services: on
+                        ? settings.provider_services.filter((id) => id !== svc.id)
+                        : [...settings.provider_services, svc.id],
+                    })
+                  }
+                />
+                <span>{svc.icon}</span>
+                {svc.name}
+              </label>
+            );
+          })}
+          {catalog.length === 0 && <span className="muted" style={{ fontSize: 12 }}>каталог сервисов пуст</span>}
         </div>
         <ListEditor
           label="Сайты и адреса"

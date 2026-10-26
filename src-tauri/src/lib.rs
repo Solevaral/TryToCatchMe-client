@@ -25,6 +25,7 @@ pub mod settings;
 pub mod subscription;
 pub mod sysproxy;
 pub mod tray;
+pub mod wireguard;
 
 // Pure, platform-independent logic lives in the ttcm-core crate; re-export it under
 // the familiar `crate::config` / `crate::links` paths.
@@ -61,12 +62,14 @@ pub fn run() {
         .manage(sysproxy::SysProxyState::default())
         .manage(tray::TrayMenu::default())
         .manage(hostlink::HostLink::default())
+        .manage(wireguard::WgState::default())
         .setup(move |app| {
             // Load saved profiles + routing + settings from disk at startup.
             let store = app.state::<ProfileStore>();
             store.load(app.handle());
             app.state::<RoutingStore>().load(app.handle());
             app.state::<settings::SettingsStore>().load(app.handle());
+            app.state::<wireguard::WgState>().load(app.handle());
             // Clean up a system proxy left pointing at us by a crash/kill (or by an
             // older version that let sing-box own it). Report once the UI is listening.
             let port = app.state::<settings::SettingsStore>().get().proxy_port;
@@ -128,6 +131,17 @@ pub fn run() {
             commands::settings_get,
             commands::settings_set,
             commands::network_interfaces,
+            wireguard::wg_list,
+            wireguard::wg_import,
+            wireguard::wg_update,
+            wireguard::wg_update_conf,
+            wireguard::wg_export,
+            wireguard::wg_remove,
+            wireguard::wg_set_active,
+            wireguard::wg_status,
+            wireguard::wg_check,
+            wireguard::wg_migration_offer,
+            wireguard::wg_migrate,
             commands::is_admin,
             commands::relaunch_admin,
             commands::diag_run,

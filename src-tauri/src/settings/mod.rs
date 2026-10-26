@@ -56,6 +56,16 @@ pub struct Settings {
     /// Same for addresses: IPs, CIDRs or domains (resolved on connect).
     #[serde(default)]
     pub tun_bypass_addresses: Vec<String>,
+    /// Built-in WireGuard (when a tunnel is active): direct traffic through the tunnel
+    /// (else through the ISP).
+    #[serde(default = "default_true")]
+    pub wg_direct_via_tunnel: bool,
+    /// Built-in WireGuard: reach the VPN server through the tunnel.
+    #[serde(default)]
+    pub wg_vpn_over_tunnel: bool,
+    /// "Through the ISP": domains / IPs that skip both the tunnel and the VPN.
+    #[serde(default)]
+    pub provider_list: Vec<String>,
 }
 
 fn default_bypass_processes() -> Vec<String> {
@@ -82,6 +92,9 @@ impl Default for Settings {
             proxy_via_direct_interface: false,
             tun_bypass_processes: default_bypass_processes(),
             tun_bypass_addresses: Vec::new(),
+            wg_direct_via_tunnel: true,
+            wg_vpn_over_tunnel: false,
+            provider_list: Vec::new(),
         }
     }
 }

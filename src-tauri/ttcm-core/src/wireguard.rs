@@ -106,16 +106,24 @@ pub fn parse_conf(text: &str) -> Result<(WgInterface, Vec<WgPeer>), String> {
     let mut mtu: Option<u16> = None;
     let mut listen_port: Option<u16> = None;
     let mut peers: Vec<WgPeer> = Vec::new();
-    // Per-peer single-value keys, reset at each [Peer].
-    let mut peer_single: (Option<String>, Option<String>, Option<String>, Option<Option<u16>>) =
-        (None, None, None, None);
+    // Per-peer single-value keys (a repeat is an error), moved into the peer at the
+    // next section / the end.
+    #[derive(Default)]
+    struct PeerSingle {
+        public_key: Option<String>,
+        preshared_key: Option<String>,
+        endpoint: Option<String>,
+        keepalive: Option<Option<u16>>,
+    }
+    let mut peer_single = PeerSingle::default();
 
-    let flush_peer = |peers: &mut Vec<WgPeer>, single: &mut (Option<String>, Option<String>, Option<String>, Option<Option<u16>>)| {
+    let flush_peer = |peers: &mut Vec<WgPeer>, single: &mut PeerSingle| {
         if let Some(p) = peers.last_mut() {
-            p.public_key = single.0.take().unwrap_or_default();
-            p.preshared_key = single.1.take();
-            p.endpoint = single.2.take();
-            p.persistent_keepalive = single.3.take().flatten();
+            let s = std::mem::take(single);
+            p.public_key = s.public_key.unwrap_or_default();
+            p.preshared_key = s.preshared_key;
+            p.endpoint = s.endpoint;
+            p.persistent_keepalive = s.keepalive.flatten();
         }
     };
 
@@ -175,9 +183,9 @@ pub fn parse_conf(text: &str) -> Result<(WgInterface, Vec<WgPeer>), String> {
             Section::Peer => {
                 let p = peers.last_mut().expect("peer section");
                 match key.as_str() {
-                    "publickey" => set_once(&mut peer_single.0, "PublicKey", value.to_string()).map_err(at)?,
-                    "presharedkey" => set_once(&mut peer_single.1, "PresharedKey", value.to_string()).map_err(at)?,
-                    "endpoint" => set_once(&mut peer_single.2, "Endpoint", value.to_string()).map_err(at)?,
+                    "publickey" => set_once(&mut peer_single.public_key, "PublicKey", value.to_string()).map_err(at)?,
+                    "presharedkey" => set_once(&mut peer_single.preshared_key, "PresharedKey", value.to_string()).map_err(at)?,
+                    "endpoint" => set_once(&mut peer_single.endpoint, "Endpoint", value.to_string()).map_err(at)?,
                     "allowedips" => p.allowed_ips.extend(split_list(value)),
                     "persistentkeepalive" => {
                         let ka = if value.eq_ignore_ascii_case("off") {
@@ -185,7 +193,7 @@ pub fn parse_conf(text: &str) -> Result<(WgInterface, Vec<WgPeer>), String> {
                         } else {
                             Some(parse_u16("PersistentKeepalive", value).map_err(at)?)
                         };
-                        set_once(&mut peer_single.3, "PersistentKeepalive", ka).map_err(at)?
+                        set_once(&mut peer_single.keepalive, "PersistentKeepalive", ka).map_err(at)?
                     }
                     _ => p.extra.push((key_raw.to_string(), value.to_string())),
                 }

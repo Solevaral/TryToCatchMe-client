@@ -55,7 +55,72 @@ export interface Settings {
   tun_bypass_processes: string[];
   /** Same for addresses: IPs, CIDRs or domains. */
   tun_bypass_addresses: string[];
+  /** Built-in WireGuard: direct traffic through the tunnel (else through the ISP). */
+  wg_direct_via_tunnel: boolean;
+  /** Built-in WireGuard: reach the VPN server through the tunnel. */
+  wg_vpn_over_tunnel: boolean;
+  /** Domains / IPs that go through the ISP, past the tunnel and the VPN. */
+  provider_list: string[];
 }
+
+// ---- built-in WireGuard ----
+
+export interface WgInterface {
+  private_key: string;
+  addresses: string[];
+  dns: string[];
+  mtu: number | null;
+  listen_port: number | null;
+  extra: [string, string][];
+}
+
+export interface WgPeer {
+  public_key: string;
+  preshared_key: string | null;
+  endpoint: string | null;
+  allowed_ips: string[];
+  persistent_keepalive: number | null;
+  extra: [string, string][];
+}
+
+export interface WgTunnel {
+  id: string;
+  name: string;
+  interface: WgInterface;
+  peers: WgPeer[];
+}
+
+export interface WgStore {
+  tunnels: WgTunnel[];
+  active: string | null;
+}
+
+export interface WgStatus {
+  running: string | null;
+  endpoint: string | null;
+  connections: number;
+  upload: number;
+  download: number;
+}
+
+export interface WgMigration {
+  interface: string;
+  direct_via_tunnel: boolean;
+  vpn_over_tunnel: boolean;
+  provider_list: string[];
+}
+
+export const wgList = () => invoke<WgStore>("wg_list");
+export const wgImport = (text: string, name: string) => invoke<WgTunnel>("wg_import", { text, name });
+export const wgUpdate = (tunnel: WgTunnel) => invoke<void>("wg_update", { tunnel });
+export const wgUpdateConf = (id: string, text: string) => invoke<WgTunnel>("wg_update_conf", { id, text });
+export const wgExport = (id: string) => invoke<string>("wg_export", { id });
+export const wgRemove = (id: string) => invoke<void>("wg_remove", { id });
+export const wgSetActive = (id: string | null) => invoke<void>("wg_set_active", { id });
+export const wgStatus = () => invoke<WgStatus>("wg_status");
+export const wgCheck = () => invoke<number>("wg_check");
+export const wgMigrationOffer = () => invoke<WgMigration | null>("wg_migration_offer");
+export const wgMigrate = () => invoke<void>("wg_migrate");
 
 /** Names of the system's active network interfaces. */
 export async function networkInterfaces(): Promise<string[]> {

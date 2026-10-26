@@ -5,6 +5,7 @@ export type ConnStatus = "disconnected" | "connecting" | "connected" | "error";
 export type Page =
   | "profiles"
   | "routing"
+  | "wireguard"
   | "diagnostics"
   | "logs"
   | "settings";

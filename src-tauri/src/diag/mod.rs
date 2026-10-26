@@ -252,6 +252,11 @@ pub fn clash_delay_via(tag: &str, test_url: &str, timeout_ms: u64) -> Option<u64
     v.get("delay").and_then(|d| d.as_u64())
 }
 
+/// GET a Clash API path (e.g. `/connections`); the response body.
+pub fn clash_get(path: &str, timeout_ms: u64) -> Option<String> {
+    http_get_localhost(CLASH_CONTROLLER, path, timeout_ms)
+}
+
 /// Minimal HTTP/1.0 GET against a localhost endpoint; returns the response body.
 fn http_get_localhost(authority: &str, path: &str, timeout_ms: u64) -> Option<String> {
     let socket = authority.to_socket_addrs().ok()?.next()?;

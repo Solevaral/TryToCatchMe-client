@@ -22,6 +22,7 @@ use crate::config::{self, geo_port, GenOptions, CLASH_CONTROLLER, MIXED_LISTEN};
 use crate::sysproxy::SysProxyState;
 use crate::profiles::ProfileStore;
 use crate::routing::RoutingStore;
+use crate::wireguard::WgState;
 use ttcm_core::routing::{antifilter_files, profile_tag, service_geo_file, GeoFile, GeoInput};
 
 #[derive(Default)]
@@ -219,12 +220,37 @@ impl CoreState {
         if tun && !tun_ipv6 {
             app_log(app, "IPv6 у сети нет — TUN только IPv4".to_string());
         }
+        // Built-in WireGuard: the active tunnel runs inside the core. It replaces the
+        // external-interface options below — said out loud, never silently.
+        let wg_tunnel = app.state::<WgState>().active();
+        if let Some(t) = &wg_tunnel {
+            let server = t.peers.iter().find_map(|p| p.endpoint.clone()).unwrap_or_default();
+            app_log(app, format!("WireGuard: туннель «{}» ({server})", t.name));
+            app_log(
+                app,
+                format!(
+                    "WireGuard: прямой трафик — {}; VPN поверх туннеля — {}",
+                    if settings.wg_direct_via_tunnel { "через туннель" } else { "через провайдера" },
+                    if settings.wg_vpn_over_tunnel && proxy_outbound.is_some() { "да" } else { "нет" },
+                ),
+            );
+            if let Some(iface) = &settings.direct_interface {
+                app_error(
+                    app,
+                    format!("Включён встроенный WireGuard — настройка «Прямой трафик через интерфейс» ({iface}) не применяется. Перенесите её на вкладке WireGuard."),
+                );
+            }
+        }
+        if !settings.provider_list.is_empty() {
+            app_log(app, format!("Через провайдера: {}", settings.provider_list.join(", ")));
+        }
         // Direct traffic through a chosen interface (e.g. another VPN's full tunnel).
         // An interface that isn't up right now falls back to automatic: binding to a
         // missing interface would break all direct traffic.
         // With `proxy_via_direct_interface` the VPN server is reached through it as well.
         let proxy_via = settings.proxy_via_direct_interface && proxy_outbound.is_some();
-        let direct_interface = settings.direct_interface.clone().filter(|iface| {
+        let legacy = settings.direct_interface.clone().filter(|_| wg_tunnel.is_none());
+        let direct_interface = legacy.filter(|iface| {
             if crate::platform::network_interfaces().iter().any(|n| n == iface) {
                 app_log(app, format!("Прямой трафик через интерфейс: {iface}"));
                 if proxy_via {
@@ -295,6 +321,11 @@ impl CoreState {
             proxy_via_direct_interface: settings.proxy_via_direct_interface,
             tun_bypass_processes: bypass_processes.clone(),
             tun_bypass_cidrs: bypass_cidrs.clone(),
+            wg: wg_tunnel.as_ref().map(|t| ttcm_core::wireguard::endpoint(t, ttcm_core::wireguard::WG_TAG)),
+            wg_dns: wg_tunnel.as_ref().map(|t| ttcm_core::wireguard::dns_servers(&t.interface)).unwrap_or_default(),
+            direct_via_wg: settings.wg_direct_via_tunnel,
+            proxy_via_wg: settings.wg_vpn_over_tunnel,
+            provider_list: settings.provider_list.clone(),
             // `info` logs every connection — real CPU cost in TUN mode.
             log_level: if settings.verbose_logs { "info".into() } else { "warn".into() },
         };
@@ -331,6 +362,7 @@ impl CoreState {
         }
         app_log(app, "Ядро запущено".to_string());
         self.expected.store(true, Ordering::SeqCst);
+        app.state::<WgState>().set_applied(wg_tunnel.as_ref().map(|t| t.id.clone()));
 
         // The app — not sing-box — owns the OS system proxy (see crate::sysproxy).
         // In TUN mode too: apps that read the system proxy (Electron apps like Claude
@@ -482,6 +514,7 @@ impl CoreState {
     /// owns the system proxy: the kill can no longer leave it pointing at a dead port.
     pub fn stop(&self, app: &AppHandle) -> Result<(), String> {
         self.expected.store(false, Ordering::SeqCst);
+        app.state::<WgState>().set_applied(None);
         let killed = {
             let mut g = self.inner.lock();
             match g.child.take() {

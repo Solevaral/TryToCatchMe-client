@@ -7,6 +7,7 @@ import { useConnection } from "./hooks/useConnection";
 import SysProxyLine from "./components/SysProxyLine";
 import ProfilesPage from "./pages/ProfilesPage";
 import RoutingPage from "./pages/RoutingPage";
+import WireGuardPage from "./pages/WireGuardPage";
 import DiagnosticsPage from "./pages/DiagnosticsPage";
 import LogsPage from "./pages/LogsPage";
 import SettingsPage from "./pages/SettingsPage";
@@ -14,6 +15,7 @@ import SettingsPage from "./pages/SettingsPage";
 const NAV: { id: Page; label: string; icon: string }[] = [
   { id: "profiles", label: "Профили", icon: "🖧" },
   { id: "routing", label: "Маршрутизация", icon: "⇄" },
+  { id: "wireguard", label: "WireGuard", icon: "⛓" },
   { id: "diagnostics", label: "Диагностика", icon: "🩺" },
   { id: "logs", label: "Логи", icon: "▤" },
   { id: "settings", label: "Настройки", icon: "⚙" },
@@ -262,6 +264,7 @@ function MainContent({ page }: { page: Page }) {
     <main className="content">
       {page === "profiles" && <ProfilesPage />}
       {page === "routing" && <RoutingPage />}
+      {page === "wireguard" && <WireGuardPage />}
       {page === "diagnostics" && <DiagnosticsPage />}
       {page === "logs" && <LogsPage />}
       {page === "settings" && <SettingsPage />}

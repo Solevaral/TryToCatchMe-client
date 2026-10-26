@@ -212,6 +212,19 @@ pub fn has_global_ipv6(if_inet6: &str) -> bool {
     })
 }
 
+/// Windows: does an `alias|ip|description` listing (IPv6 addresses with their adapter)
+/// show a usable IPv6 uplink — a global unicast address (2000::/3) on a physical
+/// adapter? Link-local, ULA (the tun's own fdfe::), the TUN / VPN / virtual adapters
+/// don't count. Same idea as `has_global_ipv6` for Linux.
+pub fn has_global_ipv6_windows(listing: &str) -> bool {
+    listing.lines().any(|line| {
+        let mut f = line.splitn(3, '|');
+        let (Some(alias), Some(ip), desc) = (f.next(), f.next(), f.next()) else { return false };
+        let Ok(ip) = ip.trim().split('%').next().unwrap_or("").parse::<std::net::Ipv6Addr>() else { return false };
+        ip.segments()[0] & 0xe000 == 0x2000 && !crate::gateway::is_virtual(alias.trim(), desc.unwrap_or("").trim())
+    })
+}
+
 /// The TUN adapter's own addresses (the tun's DNS lives in these subnets).
 const TUN_ADDRESSES: [&str; 2] = ["172.18.0.1/30", "fdfe:dcba:9876::1/126"];
 
@@ -664,6 +677,27 @@ mod tests {
         assert_eq!(cfg["inbounds"][0]["address"], json!(["172.18.0.1/30", "fdfe:dcba:9876::1/126"]));
         let cfg = generate(&GenOptions { tun: true, tun_ipv6: false, ..only_youtube() });
         assert_eq!(cfg["inbounds"][0]["address"], json!(["172.18.0.1/30"]));
+    }
+
+    #[test]
+    fn windows_ipv6_uplink_only_counts_global_on_physical() {
+        // The user's machine: no IPv6 from the ISP — only link-local and the tun's ULA.
+        let none = "Ethernet|fe80::746c:89d9:ef04:4a3c%11|Realtek PCIe GbE Family Controller
+\n                    Loopback Pseudo-Interface 1|::1|
+\n                    tun0|fdfe:dcba:9876::1|sing-tun Tunnel
+";
+        assert!(!has_global_ipv6_windows(none));
+        // A real global address on the network card.
+        let real = format!("{none}Ethernet|2a02:6b8:1::5|Realtek PCIe GbE Family Controller
+");
+        assert!(has_global_ipv6_windows(&real));
+        // Global addresses on VPN / virtual adapters don't count.
+        assert!(!has_global_ipv6_windows("all-rodoro-home|2001:db8::3|WireGuard Tunnel
+vEthernet (WSL)|2001:db8::4|Hyper-V Virtual Ethernet Adapter
+tun0|2001:db8::5|sing-tun Tunnel"));
+        assert!(!has_global_ipv6_windows("garbage
+||
+Ethernet|not-an-ip|x"));
     }
 
     #[test]

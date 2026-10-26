@@ -63,6 +63,23 @@ fn interface_names() -> Vec<String> {
     dir.filter_map(|e| e.ok()).map(|e| e.file_name().to_string_lossy().into_owned()).collect()
 }
 
+/// Windows: the network has real IPv6 (a global address on a physical adapter). If the
+/// query fails: assume yes, as before.
+#[cfg(windows)]
+pub fn uplink_has_ipv6() -> bool {
+    use std::os::windows::process::CommandExt;
+    const QUERY: &str = "[Console]::OutputEncoding = [Text.Encoding]::UTF8; Get-NetIPAddress -AddressFamily IPv6 -ErrorAction SilentlyContinue | ForEach-Object { $a = Get-NetAdapter -InterfaceIndex $_.ifIndex -ErrorAction SilentlyContinue; $_.InterfaceAlias + '|' + $_.IPAddress + '|' + $a.InterfaceDescription }";
+    let mut ps = std::process::Command::new("powershell");
+    ps.args(["-NoProfile", "-NonInteractive", "-Command", QUERY]);
+    ps.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    match ps.output() {
+        Ok(out) if out.status.success() && !out.stdout.is_empty() => {
+            ttcm_core::config::has_global_ipv6_windows(&String::from_utf8_lossy(&out.stdout))
+        }
+        _ => true,
+    }
+}
+
 /// Every adapter's IP addresses as (adapter, ip) — to spot another copy of a WireGuard
 /// tunnel (the WireGuard app holding the same address).
 pub fn interface_addresses() -> Vec<(String, String)> {

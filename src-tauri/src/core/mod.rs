@@ -252,11 +252,15 @@ impl CoreState {
                 ),
             }
         }
-        // Linux TUN: no IPv6 on the tun unless the uplink really has it (see
-        // GenOptions::tun_ipv6). Windows keeps the old behaviour.
+        // TUN: no IPv6 on the tun unless the uplink really has it (see
+        // GenOptions::tun_ipv6). Otherwise Windows too believes IPv6 works: apps pick
+        // AAAA addresses, which die in a tunnel without IPv6 and leave the VPN server
+        // from its other (IPv6) exit — slower, and a second IP for sites like Google.
         #[cfg(target_os = "linux")]
         let tun_ipv6 = crate::platform::linux::uplink_has_ipv6();
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(windows)]
+        let tun_ipv6 = !tun || crate::platform::uplink_has_ipv6();
+        #[cfg(not(any(target_os = "linux", windows)))]
         let tun_ipv6 = true;
         if tun && !tun_ipv6 {
             app_log(app, "IPv6 у сети нет — TUN только IPv4".to_string());

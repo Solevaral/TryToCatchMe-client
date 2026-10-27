@@ -199,6 +199,18 @@ export default function WireGuardPage() {
         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
           {store.tunnels.map((t) => {
             const isActive = t.id === store.active;
+            // The row tells the real state: chosen ≠ running (a watchdog may hold it off).
+            const suspended = isActive && !!status?.suspended;
+            const up = status?.running === t.id;
+            const [label, color] = !isActive
+              ? ["", "var(--border)"]
+              : suspended
+              ? ["приостановлен", "var(--warn)"]
+              : up && status?.checkable && status.alive === false
+              ? ["нет связи", "var(--err)"]
+              : up
+              ? ["подключён", "var(--ok)"]
+              : ["выбран, не запущен", "var(--warn)"];
             return (
               <div
                 key={t.id}
@@ -208,18 +220,23 @@ export default function WireGuardPage() {
                   gap: 10,
                   alignItems: "center",
                   flexWrap: "wrap",
-                  borderColor: isActive ? "var(--ok)" : "var(--border)",
+                  borderColor: color,
                 }}
               >
                 <div style={{ flex: 1, minWidth: 180 }}>
                   <div style={{ fontWeight: 600 }}>
                     {t.name}
-                    {isActive && <span style={{ color: "var(--ok)", fontWeight: 400, fontSize: 12 }}> · активный</span>}
+                    {label && <span style={{ color, fontWeight: 400, fontSize: 12 }}> · {label}</span>}
                   </div>
                   <div className="muted" style={{ fontSize: 12 }}>
                     {endpointOf(t)} · {t.interface.addresses.join(", ")}
                   </div>
                 </div>
+                {isActive && (suspended || !up) && (
+                  <button className="btn primary" disabled={busy} onClick={() => activate(t.id)}>
+                    Подключить снова
+                  </button>
+                )}
                 {isActive ? (
                   <button className="btn" disabled={busy} onClick={() => activate(null)}>
                     Отключить
@@ -326,9 +343,9 @@ export default function WireGuardPage() {
               <span className="muted" style={{ fontSize: 13 }}>{check}</span>
             </div>
           </>
-        ) : active ? (
+        ) : active && status?.suspended ? null : active ? (
           <div className="muted">
-            «{active.name}» выбран, но не подключён — нажмите «↻ Перезапустить WG» слева.
+            «{active.name}» выбран, но не запущен — нажмите «Подключить снова» у туннеля.
           </div>
         ) : (
           <div className="muted">Встроенный WireGuard выключен.</div>

@@ -256,14 +256,20 @@ impl CoreState {
         // GenOptions::tun_ipv6). Otherwise Windows too believes IPv6 works: apps pick
         // AAAA addresses, which die in a tunnel without IPv6 and leave the VPN server
         // from its other (IPv6) exit — slower, and a second IP for sites like Google.
+        // The same answer decides IPv4-only everywhere (DNS, the VPN, the tunnel): a
+        // network without IPv6 gains nothing from it, only half-working connections.
+        // The "Только IPv4" setting forces it on networks that do have IPv6.
         #[cfg(target_os = "linux")]
-        let tun_ipv6 = crate::platform::linux::uplink_has_ipv6();
+        let uplink_ipv6 = crate::platform::linux::uplink_has_ipv6();
         #[cfg(windows)]
-        let tun_ipv6 = !tun || crate::platform::uplink_has_ipv6();
+        let uplink_ipv6 = crate::platform::uplink_has_ipv6();
         #[cfg(not(any(target_os = "linux", windows)))]
-        let tun_ipv6 = true;
-        if tun && !tun_ipv6 {
-            app_log(app, "IPv6 у сети нет — TUN только IPv4".to_string());
+        let uplink_ipv6 = true;
+        let ipv4_only = settings.ipv4_only || !uplink_ipv6;
+        let tun_ipv6 = !ipv4_only;
+        if ipv4_only {
+            let why = if settings.ipv4_only { "включено в настройках" } else { "IPv6 у сети нет" };
+            app_log(app, format!("Только IPv4 ({why}): DNS, VPN и туннель без IPv6"));
         }
         // Built-in WireGuard: the active tunnel runs inside the core. It replaces the
         // external-interface options below — said out loud, never silently.
@@ -396,6 +402,7 @@ impl CoreState {
             provider_list: settings.provider_list.clone(),
             provider_service_domains: provider_service_domains.clone(),
             provider_service_cidrs: provider_service_cidrs.clone(),
+            ipv4_only,
             // `info` logs every connection — real CPU cost in TUN mode.
             log_level: if settings.verbose_logs { "info".into() } else { "warn".into() },
         };

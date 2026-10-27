@@ -65,6 +65,8 @@ export interface Settings {
   provider_list: string[];
   /** Services (catalog ids) that go through the ISP, past the tunnel and the VPN. */
   provider_services: string[];
+  /** Force IPv4 only even on a network with IPv6 (without IPv6 it's automatic). */
+  ipv4_only: boolean;
   /** The migration to the built-in tunnel was accepted. */
   wg_migrated: boolean;
 }

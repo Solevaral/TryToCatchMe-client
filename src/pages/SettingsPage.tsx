@@ -302,6 +302,21 @@ export default function SettingsPage() {
             <label style={{ display: "flex", gap: 10, alignItems: "flex-start" }}>
               <input
                 type="checkbox"
+                checked={settings.ipv4_only}
+                onChange={(e) => patch({ ipv4_only: e.target.checked })}
+              />
+              <span>
+                Только IPv4
+                <div className="muted" style={{ fontSize: 12 }}>
+                  Сайты, VPN и туннель WireGuard — только по IPv4. Если у вашей сети нет IPv6, это
+                  включается само. Галочка — чтобы включить и при IPv6: сайты вроде Google видят
+                  один адрес вместо двух и не ругаются на «подозрительный трафик».
+                </div>
+              </span>
+            </label>
+            <label style={{ display: "flex", gap: 10, alignItems: "flex-start" }}>
+              <input
+                type="checkbox"
                 checked={settings.verbose_logs}
                 onChange={(e) => patch({ verbose_logs: e.target.checked })}
               />

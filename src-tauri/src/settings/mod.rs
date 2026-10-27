@@ -69,6 +69,9 @@ pub struct Settings {
     /// The same for services picked from the catalog (ids).
     #[serde(default)]
     pub provider_services: Vec<String>,
+    /// Force IPv4 only even on a network with IPv6 (without IPv6 it's automatic).
+    #[serde(default)]
+    pub ipv4_only: bool,
     /// The migration to the built-in tunnel was accepted (the old interface options are
     /// kept for rollbacks, just not offered again).
     #[serde(default)]
@@ -103,6 +106,7 @@ impl Default for Settings {
             wg_vpn_over_tunnel: false,
             provider_list: Vec::new(),
             provider_services: Vec::new(),
+            ipv4_only: false,
             wg_migrated: false,
         }
     }

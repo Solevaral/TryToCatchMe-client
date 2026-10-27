@@ -72,6 +72,9 @@ pub struct Settings {
     /// Force IPv4 only even on a network with IPv6 (without IPv6 it's automatic).
     #[serde(default)]
     pub ipv4_only: bool,
+    /// TUN: endpoint-independent NAT for UDP (games see "moderate" NAT, not "strict").
+    #[serde(default)]
+    pub udp_independent_nat: bool,
     /// The migration to the built-in tunnel was accepted (the old interface options are
     /// kept for rollbacks, just not offered again).
     #[serde(default)]
@@ -107,6 +110,7 @@ impl Default for Settings {
             provider_list: Vec::new(),
             provider_services: Vec::new(),
             ipv4_only: false,
+            udp_independent_nat: false,
             wg_migrated: false,
         }
     }

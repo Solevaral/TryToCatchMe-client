@@ -233,6 +233,27 @@ export default function RoutingPage() {
           включая упрямые приложения (Claude, Telegram, игры). TUN требует прав администратора
           (запрос появится при включении).
         </div>
+        {settings?.capture_tun && (
+          <label style={{ display: "flex", gap: 10, alignItems: "flex-start", marginTop: 10 }}>
+            <input
+              type="checkbox"
+              checked={settings.udp_independent_nat}
+              onChange={async (e) => {
+                const next = { ...settings, udp_independent_nat: e.target.checked };
+                setSettings(next);
+                await settingsSet(next);
+                if (status === "connected") await reloadProfile();
+              }}
+            />
+            <span>
+              UDP для игр (независимый NAT)
+              <div className="muted" style={{ fontSize: 12 }}>
+                Один внешний порт на сокет игры — тест NAT в играх (Warframe и др.) показывает
+                «умеренный» вместо «строгого». UDP в TUN становится чуть медленнее.
+              </div>
+            </span>
+          </label>
+        )}
       </div>
 
       {config.mode === "rule" && (

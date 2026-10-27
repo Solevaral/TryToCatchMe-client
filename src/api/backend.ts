@@ -67,6 +67,8 @@ export interface Settings {
   provider_services: string[];
   /** Force IPv4 only even on a network with IPv6 (without IPv6 it's automatic). */
   ipv4_only: boolean;
+  /** TUN: endpoint-independent NAT for UDP (games see "moderate" NAT). */
+  udp_independent_nat: boolean;
   /** The migration to the built-in tunnel was accepted. */
   wg_migrated: boolean;
 }

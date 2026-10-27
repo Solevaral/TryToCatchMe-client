@@ -103,6 +103,10 @@ pub struct GenOptions {
     /// addresses — it can no longer pick IPv6 for some connections and IPv4 for others,
     /// so sites like Google see one IP per session instead of two.
     pub ipv4_only: bool,
+    /// TUN: endpoint-independent NAT for UDP — one external port per local socket,
+    /// whatever the destination. Games (Warframe     pub ipv4_only: bool, co.) then test their NAT as
+    /// "moderate" instead of "strict". A little slower, hence opt-in.
+    pub udp_independent_nat: bool,
 }
 
 /// A "through the ISP" entry: an IP/CIDR, or a domain (also pasted as a URL or
@@ -200,6 +204,7 @@ impl Default for GenOptions {
             provider_service_domains: Vec::new(),
             provider_service_cidrs: Vec::new(),
             ipv4_only: false,
+            udp_independent_nat: false,
         }
     }
 }
@@ -474,6 +479,10 @@ pub fn generate(opts: &GenOptions) -> Value {
             "strict_route": false,
             "stack": "mixed"
         });
+        // The "mixed" stack handles UDP with gVisor, where this option applies.
+        if opts.udp_independent_nat {
+            tun["endpoint_independent_nat"] = json!(true);
+        }
         if cfg!(target_os = "linux") {
             // Fixed name: the one-time setup allows it in ufw / firewalld (the "mixed"
             // stack hands TCP back through the tun as inbound packets). Keep in sync
@@ -663,6 +672,17 @@ mod tests {
         assert!(cfg["outbounds"].as_array().unwrap().iter().all(|o| o["type"] != "block"));
         // No DNS server may detour to the direct outbound.
         assert!(cfg["dns"]["servers"].as_array().unwrap().iter().all(|s| s["detour"] != "direct"));
+    }
+
+    #[test]
+    fn udp_independent_nat_only_on_the_tun() {
+        let cfg = generate(&GenOptions { tun: true, udp_independent_nat: true, ..only_youtube() });
+        assert_eq!(cfg["inbounds"][0]["endpoint_independent_nat"], true);
+        let mut plain = generate(&GenOptions { tun: true, ..only_youtube() });
+        plain["inbounds"][0]["endpoint_independent_nat"] = json!(true);
+        assert_eq!(cfg, plain);
+        // System proxy mode: no tun, nothing changes.
+        assert_eq!(generate(&GenOptions { udp_independent_nat: true, ..only_youtube() }), generate(&only_youtube()));
     }
 
     #[test]

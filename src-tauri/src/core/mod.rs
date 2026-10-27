@@ -411,6 +411,7 @@ impl CoreState {
             provider_service_domains: provider_service_domains.clone(),
             provider_service_cidrs: provider_service_cidrs.clone(),
             ipv4_only,
+            udp_independent_nat: settings.udp_independent_nat,
             // `info` logs every connection — real CPU cost in TUN mode.
             log_level: if settings.verbose_logs { "info".into() } else { "warn".into() },
         };

@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use parking_lot::Mutex;
+use parking_lot::{Mutex, ReentrantMutex};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager};
 
@@ -33,6 +33,10 @@ pub struct CoreState {
     /// The user wants the VPN (the active profile) on. The core also runs without it
     /// while a built-in WireGuard tunnel is on — the two are switched separately.
     vpn: AtomicBool,
+    /// Serializes start / stop / restart / apply: the UI, the tray, the startup tunnel
+    /// and the watchdogs can all ask at once, and two interleaved starts left two cores
+    /// fighting over the ports ("9090 занят"). Re-entrant: restart = stop + start.
+    op: ReentrantMutex<()>,
 }
 
 #[derive(Default)]
@@ -61,11 +65,16 @@ pub fn apply(app: &AppHandle) -> Result<(), String> {
             let _ = app.emit("app://error", format!("WireGuard: {reason}"));
         }
     }
-    let want = vpn || app.state::<WgState>().active().is_some();
     let streams = app.state::<ClashStreams>();
     let monitor = app.state::<crate::monitor::Monitor>();
+    // The monitor first, outside the lock: its watchdogs take the lock themselves, and
+    // joining it while holding the lock could deadlock.
+    monitor.stop();
+    streams.stop();
+    // Decide and act as one step: nothing else may start or stop the core in between.
+    let _op = core.op.lock();
+    let want = core.vpn.load(Ordering::SeqCst) || app.state::<WgState>().active().is_some();
     if want {
-        streams.stop();
         if core.status().running {
             core.restart(app)?;
         } else {
@@ -74,8 +83,6 @@ pub fn apply(app: &AppHandle) -> Result<(), String> {
         streams.start(app.clone());
         monitor.start(app.clone());
     } else {
-        monitor.stop();
-        streams.stop();
         core.stop(app)?;
     }
     Ok(())
@@ -104,6 +111,7 @@ impl CoreState {
     }
 
     pub fn start(&self, app: &AppHandle) -> Result<(), String> {
+        let _op = self.op.lock();
         if self.inner.lock().child.is_some() {
             return Ok(());
         }
@@ -599,6 +607,7 @@ impl CoreState {
     /// (there is no graceful stop signal there), which is exactly why the app — not sing-box —
     /// owns the system proxy: the kill can no longer leave it pointing at a dead port.
     pub fn stop(&self, app: &AppHandle) -> Result<(), String> {
+        let _op = self.op.lock();
         self.expected.store(false, Ordering::SeqCst);
         app.state::<WgState>().set_applied(None);
         let killed = {

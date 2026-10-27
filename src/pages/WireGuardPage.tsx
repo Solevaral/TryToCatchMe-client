@@ -56,13 +56,17 @@ export default function WireGuardPage() {
   const [exported, setExported] = useState<{ name: string; text: string } | null>(null);
   const [check, setCheck] = useState<string>("");
   const [catalog, setCatalog] = useState<Service[]>([]);
+  // Services routed through the VPN: ticking one here sends it past the VPN — warn.
+  const [vpnServices, setVpnServices] = useState<string[]>([]);
   const fileInput = useRef<HTMLInputElement>(null);
 
   const reload = useCallback(async () => {
     setStore(await wgList());
     setSettings(await settingsGet());
     setMigration(await wgMigrationOffer());
-    setCatalog((await routingGet()).catalog);
+    const routing = await routingGet();
+    setCatalog(routing.catalog);
+    setVpnServices(routing.config.services.filter((s) => s.action === "proxy").map((s) => s.id));
   }, []);
 
   useEffect(() => {
@@ -410,10 +414,12 @@ export default function WireGuardPage() {
         <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 12 }}>
           {catalog.map((svc) => {
             const on = settings.provider_services.includes(svc.id);
+            const clash = on && vpnServices.includes(svc.id);
             return (
               <label
                 key={svc.id}
-                style={{ ...fieldStyle, display: "flex", gap: 6, alignItems: "center", fontSize: 13, cursor: "pointer", borderColor: on ? "var(--ok)" : "var(--border)" }}
+                title={clash ? "В «Маршрутизации» этот сервис идёт через VPN — отмеченный здесь, он пойдёт напрямую через провайдера, мимо VPN" : undefined}
+                style={{ ...fieldStyle, display: "flex", gap: 6, alignItems: "center", fontSize: 13, cursor: "pointer", borderColor: clash ? "var(--warn)" : on ? "var(--ok)" : "var(--border)" }}
               >
                 <input
                   type="checkbox"
@@ -428,6 +434,7 @@ export default function WireGuardPage() {
                 />
                 <span>{svc.icon}</span>
                 {svc.name}
+                {clash && <span style={{ color: "var(--warn)" }}> ⚠ мимо VPN</span>}
               </label>
             );
           })}

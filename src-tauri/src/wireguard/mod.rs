@@ -197,15 +197,26 @@ pub fn wg_export(state: State<'_, WgState>, id: String) -> Result<String, String
     Ok(wg::to_conf(&t.interface, &t.peers))
 }
 
+/// Delete a tunnel. Deleting the connected one also takes it out of the running core
+/// (it used to keep running until the next restart).
 #[tauri::command]
-pub fn wg_remove(app: AppHandle, state: State<'_, WgState>, id: String) -> Result<(), String> {
-    state.with(&app, |s| {
+pub async fn wg_remove(app: AppHandle, id: String) -> Result<(), String> {
+    let was_active = app.state::<WgState>().with(&app, |s| {
         s.tunnels.retain(|t| t.id != id);
-        if s.active.as_deref() == Some(id.as_str()) {
+        let was = s.active.as_deref() == Some(id.as_str());
+        if was {
             s.active = None;
         }
-        Ok(())
-    })
+        Ok(was)
+    })?;
+    if !was_active {
+        return Ok(());
+    }
+    app.state::<WgState>().resume();
+    let app2 = app.clone();
+    tauri::async_runtime::spawn_blocking(move || crate::core::apply(&app2))
+        .await
+        .map_err(|e| format!("внутренняя ошибка: {e}"))?
 }
 
 /// Restart the core with the current tunnel settings (edited tunnel, modes, "not
@@ -277,7 +288,9 @@ pub fn internet_through_tunnel(app: &AppHandle) -> bool {
 }
 
 #[tauri::command]
-pub async fn wg_status(app: AppHandle) -> WgStatus {
+/// `light`: just the state (the sidebar polls it) — skip the per-connection traffic,
+/// which means pulling the whole connection list (thousands of entries in TUN).
+pub async fn wg_status(app: AppHandle, light: Option<bool>) -> WgStatus {
     let core_running = app.state::<CoreState>().status().running;
     let state = app.state::<WgState>();
     let running = if core_running { state.applied.lock().clone() } else { None };
@@ -287,7 +300,7 @@ pub async fn wg_status(app: AppHandle) -> WgStatus {
         t.peers.iter().find_map(|p| p.endpoint.clone())
     });
     let (mut connections, mut upload, mut download) = (0, 0, 0);
-    if running.is_some() {
+    if running.is_some() && !light.unwrap_or(false) {
         let body = tauri::async_runtime::spawn_blocking(|| crate::diag::clash_get("/connections", 2000))
             .await
             .ok()

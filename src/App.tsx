@@ -242,7 +242,7 @@ function ConnControls() {
   const [wgBusy, setWgBusy] = useState(false);
   useEffect(() => {
     let alive = true;
-    const tick = () => wgStatus().then((s) => alive && setWg(s)).catch(() => {});
+    const tick = () => wgStatus(true).then((s) => alive && setWg(s)).catch(() => {});
     tick();
     const t = setInterval(tick, 3000);
     return () => {
@@ -254,7 +254,7 @@ function ConnControls() {
     setWgBusy(true);
     try {
       await wgRestart();
-      setWg(await wgStatus());
+      setWg(await wgStatus(true));
     } catch {
       /* the reason is in the log */
     } finally {

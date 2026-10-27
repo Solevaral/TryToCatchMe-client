@@ -63,6 +63,9 @@ struct Strikes {
     pid: Option<u32>,
     /// Requests through the tunnel failed.
     wg: u32,
+    /// Tunnel checks so far: the conflict check (a PowerShell query) runs on every 4th
+    /// one, i.e. right after a start and then once a minute.
+    wg_checks: u32,
 }
 
 /// Re-plan the core off the monitor thread: `core::apply` stops the monitor (joins it),
@@ -118,10 +121,13 @@ fn watch_tunnel(app: &AppHandle, strikes: &mut Strikes) {
         strikes.wg = 0;
         return;
     }
-    if let Some(reason) = wg.check_conflict() {
-        let _ = app.emit("app://error", format!("WireGuard: {reason}"));
-        apply_detached(app);
-        return;
+    strikes.wg_checks += 1;
+    if strikes.wg_checks % 4 == 1 {
+        if let Some(reason) = wg.check_conflict() {
+            let _ = app.emit("app://error", format!("WireGuard: {reason}"));
+            apply_detached(app);
+            return;
+        }
     }
     // Only when internet traffic goes into the tunnel: a home-network-only tunnel can't
     // reach the test URL by design.

@@ -399,8 +399,9 @@ pub fn generate(opts: &GenOptions) -> Value {
         rules.push(json!({ "protocol": "dns", "action": "hijack-dns" }));
     }
     // IPv4 only: resolve here, before any rule sends the connection on (domain rules
-    // still match: the sniffed name is kept).
-    if opts.ipv4_only && has_proxy {
+    // still match: the sniffed name is kept). Only with DoH: VPN sites then resolve
+    // inside the VPN — through the ISP's resolver a blocked site could get a stub IP.
+    if opts.ipv4_only && has_proxy && opts.dns_doh {
         rules.push(json!({ "action": "resolve", "strategy": "ipv4_only" }));
     }
     // The app's own geo-list downloads always go through the VPN (the ISP often
@@ -1289,6 +1290,10 @@ Ethernet|not-an-ip|x"));
             plain["dns"]["strategy"] = json!("ipv4_only");
             assert_eq!(cfg, plain);
         }
+        // DoH off: VPN sites would resolve through the ISP — no local resolve then.
+        let cfg = generate(&GenOptions { ipv4_only: true, dns_doh: false, ..only_youtube() });
+        assert!(!to_string(&cfg).contains("\"resolve\""));
+        assert_eq!(cfg["dns"]["strategy"], "ipv4_only");
         // Without a VPN profile: DNS is still IPv4-only, but there's no server to hand
         // resolved addresses to — no resolve rule.
         let cfg = generate(&GenOptions { ipv4_only: true, ..GenOptions::default() });

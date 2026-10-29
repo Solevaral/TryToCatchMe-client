@@ -306,9 +306,17 @@ export async function servicesLibrary(): Promise<Service[]> {
   return await invoke<Service[]>("services_library");
 }
 
-/** Download the service library from GitHub now (it also updates itself every 6 h). */
-export async function servicesLibraryRefresh(): Promise<GeoRefreshResult> {
-  return await invoke<GeoRefreshResult>("services_library_refresh");
+/** Download the service library from GitHub now and apply it to the user's services
+ *  (it also updates itself every 6 h). */
+export async function servicesLibraryRefresh(): Promise<ServicesRefreshResult> {
+  return await invoke<ServicesRefreshResult>("services_library_refresh");
+}
+
+export interface ServicesRefreshResult {
+  ok: boolean;
+  message: string;
+  /** The user's services changed: the running tunnel needs a reload. */
+  changed: boolean;
 }
 
 export interface GeoRefreshResult {

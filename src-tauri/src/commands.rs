@@ -210,23 +210,38 @@ pub fn services_library(app: AppHandle) -> Vec<Service> {
     crate::routing::library_with_updates(&app)
 }
 
-/// «Обновить список» in the service library: download it from GitHub now
-/// (through the VPN when connected).
+/// «Обновить сервисы» / «Обновить список» in the library: download it from GitHub now
+/// (through the VPN when connected) and apply it to the user's services.
 #[tauri::command]
-pub async fn services_library_refresh(app: AppHandle) -> GeoRefreshResult {
+pub async fn services_library_refresh(app: AppHandle) -> ServicesRefreshResult {
     let running = app.state::<CoreState>().vpn_connected();
     let has_proxy = app.state::<ProfileStore>().active_outbound().is_some();
     let vpn_port = (running && has_proxy).then(|| app.state::<SettingsStore>().get().proxy_port);
     match crate::library::refresh_now(&app, vpn_port).await {
-        Ok(n) => GeoRefreshResult { ok: true, message: format!("Список обновлён: {n} сервисов в библиотеке GitHub") },
+        Ok((n, report)) => {
+            let changes = crate::library::describe(&report);
+            let message = match &changes {
+                Some(c) => format!("Библиотека GitHub: {n} сервисов. Ваши сервисы: {c}"),
+                None => format!("Библиотека GitHub: {n} сервисов. Ваши сервисы уже актуальны"),
+            };
+            ServicesRefreshResult { ok: true, message, changed: changes.is_some() }
+        }
         Err(e) => {
             let mut message = format!("Не удалось обновить список: {e}. Используется сохранённый.");
             if vpn_port.is_none() {
                 message.push_str(" Подключите VPN и повторите — GitHub может быть недоступен напрямую.");
             }
-            GeoRefreshResult { ok: false, message }
+            ServicesRefreshResult { ok: false, message, changed: false }
         }
     }
+}
+
+#[derive(serde::Serialize)]
+pub struct ServicesRefreshResult {
+    pub ok: bool,
+    pub message: String,
+    /// The user's services changed (the running tunnel needs a reload to use them).
+    pub changed: bool,
 }
 
 #[derive(serde::Serialize)]

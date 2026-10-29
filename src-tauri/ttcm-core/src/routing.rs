@@ -23,7 +23,7 @@ pub struct Rule {
 }
 
 /// A predefined service (Cloudflare, Steam, …) — editable set of addresses.
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
 pub struct Service {
     pub id: String,
     pub name: String,

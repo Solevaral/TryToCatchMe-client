@@ -54,6 +54,95 @@ struct Persisted {
     catalog: Vec<Service>,
     #[serde(default)]
     presets_version: u32,
+    /// Library services as last synced from GitHub: tells the maintainer's changes
+    /// apart from the user's own edits on the next sync (see `sync_service`).
+    #[serde(default)]
+    library_base: Vec<Service>,
+}
+
+/// What a sync with the downloaded library changed in the user's services.
+#[derive(Default, Debug, PartialEq)]
+pub struct SyncReport {
+    pub updated: Vec<String>,
+    pub removed: Vec<String>,
+}
+
+/// Three-way merge of a list: the library's new version, minus what the user removed,
+/// plus what the user added since `base`.
+fn merge_list(base: &[String], cur: &[String], new: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = new
+        .iter()
+        .filter(|x| cur.contains(x) || !base.contains(x))
+        .cloned()
+        .collect();
+    for x in cur {
+        if !base.contains(x) && !out.contains(x) {
+            out.push(x.clone());
+        }
+    }
+    out
+}
+
+/// A field the user changed keeps the user's value, otherwise it follows the library.
+fn merge_field<T: PartialEq + Clone>(base: &T, cur: &T, new: &T) -> T {
+    if cur == base { new.clone() } else { cur.clone() }
+}
+
+/// Apply the library's version of a service on top of the user's copy.
+fn sync_service(base: &Service, cur: &Service, new: &Service) -> Service {
+    Service {
+        id: cur.id.clone(),
+        name: merge_field(&base.name, &cur.name, &new.name),
+        icon: merge_field(&base.icon, &cur.icon, &new.icon),
+        domains: merge_list(&base.domains, &cur.domains, &new.domains),
+        ip_cidrs: merge_list(&base.ip_cidrs, &cur.ip_cidrs, &new.ip_cidrs),
+        geosite: merge_field(&base.geosite, &cur.geosite, &new.geosite),
+    }
+}
+
+/// Bring the user's services in line with the library downloaded from GitHub:
+/// services from it get its changes (user edits stay), services the library no longer
+/// has are removed. The user's own services and built-in ones the library doesn't
+/// list are left alone.
+fn sync_with_library(p: &mut Persisted, remote: &[Service]) -> SyncReport {
+    let builtin = library();
+    let bundled: Vec<Service> = serde_json::from_str(SERVICE_LIBRARY).unwrap_or_default();
+    let mut report = SyncReport::default();
+    for svc in p.catalog.iter_mut() {
+        let Some(new) = remote.iter().find(|r| r.id == svc.id) else { continue };
+        let base = p
+            .library_base
+            .iter()
+            .chain(builtin.iter())
+            .find(|b| b.id == svc.id)
+            .cloned()
+            .unwrap_or_else(|| svc.clone());
+        let merged = sync_service(&base, svc, new);
+        if merged != *svc {
+            report.updated.push(merged.name.clone());
+            *svc = merged;
+        }
+    }
+    let gone: Vec<String> = p
+        .catalog
+        .iter()
+        .filter(|s| !remote.iter().any(|r| r.id == s.id))
+        .filter(|s| p.library_base.iter().chain(bundled.iter()).any(|b| b.id == s.id))
+        .map(|s| s.id.clone())
+        .collect();
+    for id in &gone {
+        if let Some(s) = p.catalog.iter().find(|s| &s.id == id) {
+            report.removed.push(s.name.clone());
+        }
+    }
+    p.catalog.retain(|s| !gone.contains(&s.id));
+    p.config.services.retain(|s| !gone.contains(&s.id));
+    p.library_base = remote
+        .iter()
+        .filter(|r| p.catalog.iter().any(|s| s.id == r.id))
+        .cloned()
+        .collect();
+    report
 }
 
 /// v5: Gemini is no longer a separate service. Google decides the country for Gemini
@@ -216,6 +305,7 @@ impl RoutingStore {
             config: RoutingConfig::default(),
             catalog: Vec::new(),
             presets_version: PRESETS_VERSION,
+            library_base: Vec::new(),
         });
         if p.catalog.is_empty() {
             p.catalog = default_catalog();
@@ -233,6 +323,7 @@ impl RoutingStore {
             config: RoutingConfig::default(),
             catalog: default_catalog(),
             presets_version: PRESETS_VERSION,
+            library_base: Vec::new(),
         });
         f(p)
     }
@@ -316,4 +407,76 @@ impl RoutingStore {
         })
     }
 
+    /// Apply the library downloaded from GitHub to the user's services (see
+    /// `sync_with_library`). Saved only when something changed.
+    pub fn sync_library(&self, app: &AppHandle, remote: &[Service]) -> SyncReport {
+        let (report, changed) = self.with(|p| {
+            let before = p.library_base.clone();
+            let report = sync_with_library(p, remote);
+            let changed = !report.updated.is_empty() || !report.removed.is_empty() || before != p.library_base;
+            (report, changed)
+        });
+        if changed {
+            let _ = self.save(app);
+        }
+        report
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn svc(id: &str, name: &str, domains: &[&str]) -> Service {
+        Service {
+            id: id.into(),
+            name: name.into(),
+            icon: "🎵".into(),
+            domains: domains.iter().map(|d| d.to_string()).collect(),
+            ip_cidrs: Vec::new(),
+            geosite: None,
+        }
+    }
+
+    fn persisted(catalog: Vec<Service>, base: Vec<Service>) -> Persisted {
+        let mut config = RoutingConfig::default();
+        config.services = catalog
+            .iter()
+            .map(|s| ttcm_core::routing::ServiceSel { id: s.id.clone(), action: "proxy".into(), profile: None })
+            .collect();
+        Persisted { config, catalog, presets_version: PRESETS_VERSION, library_base: base }
+    }
+
+    #[test]
+    fn library_changes_apply_and_user_edits_stay() {
+        let base = svc("tiktok", "TikTok", &["tiktok.com", "old.com", "user-removed.com"]);
+        let cur = svc("tiktok", "TikTok", &["tiktok.com", "user-removed.com", "mine.com"]);
+        let cur = Service { domains: cur.domains.into_iter().filter(|d| d != "user-removed.com").collect(), ..cur };
+        let new = svc("tiktok", "TikTok!", &["tiktok.com", "ttwstatic.com", "user-removed.com"]);
+        let mut p = persisted(vec![cur], vec![base]);
+        let r = sync_with_library(&mut p, &[new.clone()]);
+        assert_eq!(r.updated, vec!["TikTok!".to_string()]);
+        assert_eq!(p.catalog[0].domains, vec!["tiktok.com", "ttwstatic.com", "mine.com"]);
+        assert_eq!(p.library_base, vec![new]);
+    }
+
+    #[test]
+    fn removed_library_services_go_custom_ones_stay() {
+        let lib = svc("dropped", "Dropped", &["a.com"]);
+        let custom = svc("custom-1", "Мой", &["b.com"]);
+        let builtin = svc("youtube", "YouTube", &["youtube.com"]);
+        let mut p = persisted(vec![lib.clone(), custom, builtin], vec![lib]);
+        let r = sync_with_library(&mut p, &[svc("other", "Other", &["c.com"])]);
+        assert_eq!(r.removed, vec!["Dropped".to_string()]);
+        let ids: Vec<_> = p.catalog.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(ids, vec!["custom-1", "youtube"]);
+        assert!(!p.config.services.iter().any(|s| s.id == "dropped"));
+    }
+
+    #[test]
+    fn unchanged_library_is_a_no_op() {
+        let s = svc("tiktok", "TikTok", &["tiktok.com"]);
+        let mut p = persisted(vec![s.clone()], vec![s.clone()]);
+        assert_eq!(sync_with_library(&mut p, &[s]), SyncReport::default());
+    }
 }

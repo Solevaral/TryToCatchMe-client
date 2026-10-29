@@ -5,7 +5,9 @@
 //! branch. The fetched copy is cached in `<app config>/service-library.json` and
 //! overrides built-in entries with the same id, so a new service or corrected domains
 //! reach users as soon as the file on GitHub changes. A failed or invalid download keeps
-//! the cached (or built-in) library.
+//! the cached (or built-in) library. Each download is also applied to the services the
+//! user already added (`RoutingStore::sync_library`): changed ones are updated, ones gone
+//! from the library are removed.
 
 use std::fs;
 use std::path::PathBuf;
@@ -15,6 +17,8 @@ use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager};
 use ttcm_core::config::{geo_port, MIXED_LISTEN};
 use ttcm_core::routing::Service;
+
+use crate::routing::{RoutingStore, SyncReport};
 
 pub const URL: &str =
     "https://raw.githubusercontent.com/Solevaral/TryToCatchMe-client/main/src-tauri/resources/service-library.json";
@@ -84,9 +88,10 @@ async fn fetch(proxy: Option<&str>) -> Result<String, String> {
     resp.text().await.map_err(|e| crate::geo::describe_reqwest(&e))
 }
 
-/// Download the library (through the VPN first when connected) and cache it.
-/// Returns the number of services, or why nothing changed.
-async fn update(app: &AppHandle, vpn_port: Option<u16>) -> Result<usize, String> {
+/// Download the library (through the VPN first when connected), cache it and apply it
+/// to the user's services. Returns the number of services and what changed, or why
+/// nothing changed.
+async fn update(app: &AppHandle, vpn_port: Option<u16>) -> Result<(usize, SyncReport), String> {
     let mut attempts: Vec<Option<String>> = Vec::new();
     if let Some(port) = vpn_port {
         attempts.push(Some(format!("http://{MIXED_LISTEN}:{}", geo_port(port))));
@@ -104,7 +109,8 @@ async fn update(app: &AppHandle, vpn_port: Option<u16>) -> Result<usize, String>
                 let tmp = path.with_extension("json.tmp");
                 fs::write(&tmp, body).map_err(|e| format!("не удалось записать: {e}"))?;
                 fs::rename(&tmp, &path).map_err(|e| format!("не удалось записать: {e}"))?;
-                return Ok(list.len());
+                let report = app.state::<RoutingStore>().sync_library(app, &list);
+                return Ok((list.len(), report));
             }
             Err(e) => last_error = e,
         }
@@ -112,8 +118,20 @@ async fn update(app: &AppHandle, vpn_port: Option<u16>) -> Result<usize, String>
     Err(last_error)
 }
 
-/// «Обновить список» in the library: download now, regardless of the cache age.
-pub async fn refresh_now(app: &AppHandle, vpn_port: Option<u16>) -> Result<usize, String> {
+/// What a sync changed, for messages; None when nothing did.
+pub fn describe(report: &SyncReport) -> Option<String> {
+    let mut parts = Vec::new();
+    if !report.updated.is_empty() {
+        parts.push(format!("обновлены {}", report.updated.join(", ")));
+    }
+    if !report.removed.is_empty() {
+        parts.push(format!("удалены {}", report.removed.join(", ")));
+    }
+    (!parts.is_empty()).then(|| parts.join("; "))
+}
+
+/// «Обновить сервисы» / «Обновить список»: download now, regardless of the cache age.
+pub async fn refresh_now(app: &AppHandle, vpn_port: Option<u16>) -> Result<(usize, SyncReport), String> {
     if BUSY.swap(true, Ordering::SeqCst) {
         return Err("список уже скачивается".into());
     }
@@ -125,14 +143,29 @@ pub async fn refresh_now(app: &AppHandle, vpn_port: Option<u16>) -> Result<usize
 /// Refresh in the background when the cached copy is missing or stale.
 /// `vpn_port` — the local proxy port while connected (download goes through the VPN).
 pub fn schedule(app: &AppHandle, vpn_port: Option<u16>) {
-    if is_fresh(app) || BUSY.swap(true, Ordering::SeqCst) {
+    if is_fresh(app) {
+        // A fresh copy may still be newer than the user's services (downloaded by an
+        // older version that didn't sync them).
+        let list = cached(app);
+        if !list.is_empty() {
+            let report = app.state::<RoutingStore>().sync_library(app, &list);
+            if let Some(changes) = describe(&report) {
+                let _ = app.emit("app://log", format!("Сервисы обновлены из библиотеки: {changes}"));
+            }
+        }
+        return;
+    }
+    if BUSY.swap(true, Ordering::SeqCst) {
         return;
     }
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
         // В консоль журнала приложения: ошибка здесь не мешает работе, поэтому не app://error.
         let msg = match update(&app, vpn_port).await {
-            Ok(n) => format!("Библиотека сервисов обновлена: {n} шт."),
+            Ok((n, report)) => match describe(&report) {
+                Some(changes) => format!("Библиотека сервисов обновлена: {n} шт. Изменено: {changes}"),
+                None => format!("Библиотека сервисов обновлена: {n} шт."),
+            },
             Err(e) => format!("Библиотека сервисов не обновлена ({e}), использую сохранённую"),
         };
         let _ = app.emit("app://log", msg);

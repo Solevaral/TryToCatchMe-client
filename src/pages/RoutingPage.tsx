@@ -41,6 +41,8 @@ export default function RoutingPage() {
   const [geoFrom, setGeoFrom] = useState<"ru" | "antifilter">("ru");
   const [settings, setSettings] = useState<Settings | null>(null);
   const [profiles, setProfiles] = useState<Profile[]>([]);
+  const [syncing, setSyncing] = useState(false);
+  const [syncResult, setSyncResult] = useState<{ ok: boolean; message: string } | null>(null);
 
   async function reload() {
     const snap = await routingGet();
@@ -165,6 +167,24 @@ export default function RoutingPage() {
     await serviceRemove(id);
     await reload();
   }
+  // The library was applied to the user's services: show them and use them right away.
+  async function afterSync(changed: boolean) {
+    if (!changed) return;
+    await reload();
+    if (status === "connected") await reloadProfile();
+  }
+  async function syncServices() {
+    setSyncing(true);
+    setSyncResult(null);
+    try {
+      const r = await servicesLibraryRefresh();
+      setSyncResult({ ok: r.ok, message: r.message });
+      await afterSync(r.changed);
+    } catch (e) {
+      setSyncResult({ ok: false, message: String(e) });
+    }
+    setSyncing(false);
+  }
 
   const reloadLabel =
     reloadState === "..."
@@ -269,8 +289,30 @@ export default function RoutingPage() {
                 <button className="btn" style={{ padding: "4px 10px" }} onClick={() => setEditing({ id: "", name: "", icon: "🔧", domains: [], ip_cidrs: [] })}>
                   ＋ Свой сервис
                 </button>
+                <button
+                  className="btn"
+                  style={{ padding: "4px 10px" }}
+                  disabled={syncing}
+                  onClick={syncServices}
+                  title="Скачать библиотеку с GitHub: новые сервисы появятся в библиотеке, изменённые обновятся (ваши правки сохраняются), убранные из библиотеки удалятся. Свои сервисы не трогаются."
+                >
+                  {syncing ? "Обновляю…" : "↻ Обновить сервисы"}
+                </button>
               </div>
             </div>
+            {syncResult && (
+              <div
+                style={{
+                  fontSize: 12,
+                  marginBottom: 10,
+                  color: syncResult.ok ? "var(--ok)" : "var(--err)",
+                  wordBreak: "break-word",
+                }}
+              >
+                {syncResult.ok ? "✓ " : "✕ "}
+                {syncResult.message}
+              </div>
+            )}
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(230px, 1fr))", gap: 10 }}>
               {catalog.map((svc) => {
                 const on = serviceEnabled(svc.id);
@@ -411,6 +453,7 @@ export default function RoutingPage() {
           catalog={catalog}
           onAdd={addFromLibrary}
           onRemove={removeFromCatalog}
+          onSynced={afterSync}
           onClose={() => setShowLibrary(false)}
         />
       )}
@@ -447,11 +490,13 @@ function LibraryModal({
   catalog,
   onAdd,
   onRemove,
+  onSynced,
   onClose,
 }: {
   catalog: Service[];
   onAdd: (s: Service) => void;
   onRemove: (id: string) => void;
+  onSynced: (changed: boolean) => void;
   onClose: () => void;
 }) {
   const [lib, setLib] = useState<Service[]>([]);
@@ -466,6 +511,7 @@ function LibraryModal({
       const r = await servicesLibraryRefresh();
       setRefreshMsg({ ok: r.ok, text: r.message });
       setLib(await servicesLibrary());
+      onSynced(r.changed);
     } catch (e) {
       setRefreshMsg({ ok: false, text: String(e) });
     } finally {

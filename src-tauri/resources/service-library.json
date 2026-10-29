@@ -5,7 +5,7 @@
   {"id": "instagram", "name": "Instagram", "icon": "📸", "domains": ["instagram.com", "cdninstagram.com", "ig.me"], "ip_cidrs": []},
   {"id": "twitter", "name": "X / Twitter", "icon": "✖️", "domains": ["twitter.com", "x.com", "twimg.com", "t.co", "twitterinc.com"], "ip_cidrs": []},
   {"id": "whatsapp", "name": "WhatsApp", "icon": "🟢", "domains": ["whatsapp.com", "whatsapp.net", "wa.me"], "ip_cidrs": []},
-  {"id": "tiktok", "name": "TikTok", "icon": "🎵", "domains": ["tiktok.com", "tiktokcdn.com", "tiktokv.com", "ibytedtos.com", "byteoversea.com"], "ip_cidrs": []},
+  {"id": "tiktok", "name": "TikTok", "icon": "🎵", "domains": ["tiktok.com", "tiktokcdn.com", "tiktokv.com", "ibytedtos.com", "byteoversea.com", "ttwstatic.com", "tiktokcdn-us.com", "tiktokcdn-eu.com", "tiktokcdn-row.com", "tiktokrow-cdn.com", "tiktokeu-cdn.com", "tiktokw.us", "tiktokw.eu", "tiktokv.us", "tiktokv.eu", "tiktokd.net", "tiktokd.org", "tik-tokapi.com", "tiktok.org", "tiktokmusic.app", "ibyteimg.com", "ipstatp.com", "sgpstatp.com", "isnssdk.com", "muscdn.com", "musical.ly", "ttlivecdn.com", "byteintl.com", "byteintlapi.com"], "ip_cidrs": []},
   {"id": "spotify", "name": "Spotify", "icon": "🎧", "domains": ["spotify.com", "scdn.co", "spotifycdn.com", "spoti.fi"], "ip_cidrs": []},
   {"id": "twitch", "name": "Twitch", "icon": "🟣", "domains": ["twitch.tv", "ttvnw.net", "jtvnw.net", "twitchcdn.net"], "ip_cidrs": []},
   {"id": "reddit", "name": "Reddit", "icon": "👽", "domains": ["reddit.com", "redd.it", "redditstatic.com", "redditmedia.com"], "ip_cidrs": []},

@@ -44,7 +44,7 @@ pub fn library_with_updates(app: &AppHandle) -> Vec<Service> {
 }
 
 /// Bump when built-in service domains change, so stored catalogs pick up additions.
-const PRESETS_VERSION: u32 = 6;
+const PRESETS_VERSION: u32 = 7;
 
 #[derive(Serialize, Deserialize, Clone)]
 struct Persisted {

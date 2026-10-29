@@ -1,6 +1,6 @@
 [package]
 name = "trytocatchme"
-version = "1.4.4"
+version = "1.4.5"
 description = "Cross-platform VPN/proxy client (Tauri + sing-box)"
 authors = ["TryToCatchMe"]
 edition = "2021"

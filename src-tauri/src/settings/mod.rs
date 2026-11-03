@@ -72,7 +72,13 @@ pub struct Settings {
     /// Force IPv4 only even on a network with IPv6 (without IPv6 it's automatic).
     #[serde(default)]
     pub ipv4_only: bool,
+    /// TUN: point the system proxy at us too. Off by default: TUN already captures
+    /// everything, and some apps break on a system proxy (Mir Tankov's urllib2 hangs
+    /// on "Подключение…").
+    #[serde(default)]
+    pub tun_system_proxy: bool,
     /// TUN: endpoint-independent NAT for UDP (games see "moderate" NAT, not "strict").
+    /// Works only with `experimental` on.
     #[serde(default)]
     pub udp_independent_nat: bool,
     /// The migration to the built-in tunnel was accepted (the old interface options are
@@ -110,6 +116,7 @@ impl Default for Settings {
             provider_list: Vec::new(),
             provider_services: Vec::new(),
             ipv4_only: false,
+            tun_system_proxy: false,
             udp_independent_nat: false,
             wg_migrated: false,
         }
@@ -125,6 +132,11 @@ impl Settings {
     /// Auto-switch is an experimental feature: off unless both toggles are on.
     pub fn auto_switch_on(&self) -> bool {
         self.experimental && self.auto_switch
+    }
+
+    /// Independent UDP NAT is an experimental feature too.
+    pub fn udp_independent_nat_on(&self) -> bool {
+        self.experimental && self.udp_independent_nat
     }
 }
 

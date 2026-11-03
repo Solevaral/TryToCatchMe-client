@@ -379,15 +379,6 @@ export default function SettingsPage() {
         )}
       </div>
 
-      <div className="card" style={{ marginBottom: 18 }}>
-        <div style={{ fontWeight: 600, marginBottom: 10 }}>Перехват трафика</div>
-        <div className="muted">
-          Режим перехвата (Системный прокси / TUN) переключается на вкладке
-          «Маршрутизация». TUN ловит весь трафик (включая приложения, игнорирующие прокси)
-          и требует прав администратора — запрос появится при включении.
-        </div>
-      </div>
-
       <div className="card">
         <div style={{ fontWeight: 600, marginBottom: 6 }}>О приложении</div>
         <div className="muted">TryToCatchMe · версия {version}</div>

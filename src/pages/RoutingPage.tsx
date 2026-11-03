@@ -76,6 +76,15 @@ export default function RoutingPage() {
     if (status === "connected") await reloadProfile();
   }
 
+  // TUN options: saved and applied to the running tunnel right away.
+  async function patchTun(p: Partial<Settings>) {
+    if (!settings) return;
+    const next = { ...settings, ...p };
+    setSettings(next);
+    await settingsSet(next);
+    if (status === "connected") await reloadProfile();
+  }
+
   async function persist(next: RoutingConfig) {
     setConfig(next);
     await routingSetConfig(next);
@@ -257,13 +266,25 @@ export default function RoutingPage() {
           <label style={{ display: "flex", gap: 10, alignItems: "flex-start", marginTop: 10 }}>
             <input
               type="checkbox"
+              checked={settings.tun_system_proxy}
+              onChange={(e) => patchTun({ tun_system_proxy: e.target.checked })}
+            />
+            <span>
+              Включить системный прокси тоже
+              <div className="muted" style={{ fontSize: 12 }}>
+                Программы, читающие системный прокси, пойдут в клиент, а не в прокси, оставленный
+                другим VPN-клиентом. Некоторые программы с системным прокси не работают
+                (например, «Мир танков» вечно висит на «Подключение…») — тогда выключите.
+              </div>
+            </span>
+          </label>
+        )}
+        {settings?.capture_tun && settings.experimental && (
+          <label style={{ display: "flex", gap: 10, alignItems: "flex-start", marginTop: 10 }}>
+            <input
+              type="checkbox"
               checked={settings.udp_independent_nat}
-              onChange={async (e) => {
-                const next = { ...settings, udp_independent_nat: e.target.checked };
-                setSettings(next);
-                await settingsSet(next);
-                if (status === "connected") await reloadProfile();
-              }}
+              onChange={(e) => patchTun({ udp_independent_nat: e.target.checked })}
             />
             <span>
               UDP для игр (независимый NAT)

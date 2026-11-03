@@ -104,7 +104,7 @@ pub struct GenOptions {
     /// so sites like Google see one IP per session instead of two.
     pub ipv4_only: bool,
     /// TUN: endpoint-independent NAT for UDP — one external port per local socket,
-    /// whatever the destination. Games (Warframe     pub ipv4_only: bool, co.) then test their NAT as
+    /// whatever the destination. Games (Warframe & co.) then test their NAT as
     /// "moderate" instead of "strict". A little slower, hence opt-in.
     pub udp_independent_nat: bool,
 }

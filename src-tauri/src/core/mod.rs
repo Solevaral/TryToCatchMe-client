@@ -411,7 +411,7 @@ impl CoreState {
             provider_service_domains: provider_service_domains.clone(),
             provider_service_cidrs: provider_service_cidrs.clone(),
             ipv4_only,
-            udp_independent_nat: settings.udp_independent_nat,
+            udp_independent_nat: settings.udp_independent_nat_on(),
             // `info` logs every connection — real CPU cost in TUN mode.
             log_level: if settings.verbose_logs { "info".into() } else { "warn".into() },
         };
@@ -451,36 +451,43 @@ impl CoreState {
         app.state::<WgState>().set_applied(wg_tunnel.as_ref().map(|t| t.id.clone()));
 
         // The app — not sing-box — owns the OS system proxy (see crate::sysproxy).
-        // In TUN mode too: apps that read the system proxy (Electron apps like Claude
-        // Desktop, browsers) connect to whatever it points at, and a proxy left by
-        // another client (e.g. Hiddify) would send them past the tunnel entirely.
+        // In TUN mode only when asked (`tun_system_proxy`): it keeps apps that read the
+        // system proxy away from a proxy left by another client (e.g. Hiddify), but some
+        // apps break on any system proxy (Mir Tankov hangs on login).
         // Linux: a PAC script with the same routing, so apps send only VPN-routed hosts
         // to the proxy and connect directly otherwise (see ttcm_core::pac).
-        #[cfg(target_os = "linux")]
-        let pac = Some(pac_script(&bin, &spec.rules, &spec.rule_sets, &spec.final_action, port));
-        #[cfg(not(target_os = "linux"))]
-        let pac: Option<String> = None;
-        let with_pac = pac.is_some();
-        match app.state::<SysProxyState>().apply(app, port, pac) {
-            Ok(note) => {
-                if let Some(n) = note {
-                    app_error(app, n);
+        if tun && !settings.tun_system_proxy {
+            app_log(
+                app,
+                format!("Системный прокси не трогаю — TUN ловит весь трафик (сейчас: {})", crate::sysproxy::os::describe()),
+            );
+        } else {
+            #[cfg(target_os = "linux")]
+            let pac = Some(pac_script(&bin, &spec.rules, &spec.rule_sets, &spec.final_action, port));
+            #[cfg(not(target_os = "linux"))]
+            let pac: Option<String> = None;
+            let with_pac = pac.is_some();
+            match app.state::<SysProxyState>().apply(app, port, pac) {
+                Ok(note) => {
+                    if let Some(n) = note {
+                        app_error(app, n);
+                    }
+                    let how = if with_pac { " (PAC: в прокси только то, что идёт через VPN)" } else { "" };
+                    if tun {
+                        app_log(app, format!("Системный прокси тоже направлен в VPN: {MIXED_LISTEN}:{port}{how} (программы, читающие прокси, не уйдут мимо TUN)"));
+                    } else {
+                        app_log(app, format!("Системный прокси включён: {MIXED_LISTEN}:{port}{how}"));
+                    }
                 }
-                let how = if with_pac { " (PAC: в прокси только то, что идёт через VPN)" } else { "" };
-                if tun {
-                    app_log(app, format!("Системный прокси тоже направлен в VPN: {MIXED_LISTEN}:{port}{how} (программы, читающие прокси, не уйдут мимо TUN)"));
-                } else {
-                    app_log(app, format!("Системный прокси включён: {MIXED_LISTEN}:{port}{how}"));
-                }
+                Err(e) if tun => app_error(
+                    app,
+                    format!("TUN работает, но системный прокси перенаправить не удалось: {e}. Программы, использующие системный прокси, могут идти мимо VPN."),
+                ),
+                Err(e) => app_error(
+                    app,
+                    format!("Ядро работает, но включить системный прокси не удалось: {e}. Укажите вручную {MIXED_LISTEN}:{port}."),
+                ),
             }
-            Err(e) if tun => app_error(
-                app,
-                format!("TUN работает, но системный прокси перенаправить не удалось: {e}. Программы, использующие системный прокси, могут идти мимо VPN."),
-            ),
-            Err(e) => app_error(
-                app,
-                format!("Ядро работает, но включить системный прокси не удалось: {e}. Укажите вручную {MIXED_LISTEN}:{port}."),
-            ),
         }
 
         if let Some(ob) = &proxy_outbound {

@@ -80,7 +80,17 @@ async fn fetch(proxy: Option<&str>) -> Result<String, String> {
         None => builder.no_proxy(),
     };
     let client = builder.build().map_err(|e| e.to_string())?;
-    let resp = client.get(URL).send().await.map_err(|e| crate::geo::describe_reqwest(&e))?;
+    // raw.githubusercontent.com caches files for 5 minutes; a unique query skips that,
+    // so «Обновить сервисы» right after a push gets the new file.
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or_default();
+    let resp = client
+        .get(format!("{URL}?t={stamp}"))
+        .send()
+        .await
+        .map_err(|e| crate::geo::describe_reqwest(&e))?;
     let status = resp.status();
     if !status.is_success() {
         return Err(format!("сервер ответил {status}"));

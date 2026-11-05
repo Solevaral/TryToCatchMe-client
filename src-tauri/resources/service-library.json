@@ -53,5 +53,5 @@
   {"id": "fandom", "name": "Fandom", "icon": "📖", "domains": ["fandom.com", "wikia.com", "wikia.org", "nocookie.net"], "ip_cidrs": []},
   {"id": "tiermaker", "name": "TierMaker", "icon": "🏆", "domains": ["tiermaker.com"], "ip_cidrs": []},
   {"id": "factorio", "name": "Factorio", "icon": "⚙️", "domains": ["factorio.com"], "ip_cidrs": []},
-  {"id": "eve-frontier-auth", "name": "EVE Frontier", "icon": "🚀", "domains": ["engine2.extccp.com", "evefrontier.com"], "ip_cidrs": ["13.248.184.148/32"]}
+  {"id": "eve-frontier-auth", "name": "EVE Frontier", "icon": "🚀", "domains": ["engine2.extccp.com", "evefrontier.com"], "ip_cidrs": ["13.248.184.148/32", "166.117.148.0/32"]}
 ]

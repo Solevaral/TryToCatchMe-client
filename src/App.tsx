@@ -291,6 +291,11 @@ function ConnControls() {
           {wgBusy ? "Перезапуск…" : "↻ Перезапустить WG"}
         </button>
       )}
+      {wg?.running && wg.alive === false && (
+        <div style={{ fontSize: 11, color: "var(--err)" }} title={wg.detail ?? undefined}>
+          WireGuard: нет связи через туннель
+        </div>
+      )}
     </div>
   );
 }

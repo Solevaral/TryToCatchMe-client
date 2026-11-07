@@ -115,11 +115,15 @@ export interface WgStatus {
   download: number;
   /** Why the chosen tunnel is held off right now (another copy running, not answering). */
   suspended: string | null;
-  /** Internet traffic goes through the tunnel, so its connection can be checked. */
+  /** The connection can be checked: internet through the tunnel, or its own networks. */
   checkable: boolean;
+  /** "internet": a test URL through the tunnel; "networks": hosts behind it. */
+  check_kind: "internet" | "networks" | null;
   /** The last check through the tunnel answered (null: not checked yet). */
   alive: boolean | null;
   checked_ago: number | null;
+  /** What the last check found (who answered, or why there's no connection). */
+  detail: string | null;
 }
 
 export interface WgMigration {
@@ -138,7 +142,8 @@ export const wgRemove = (id: string) => invoke<void>("wg_remove", { id });
 export const wgSetActive = (id: string | null) => invoke<void>("wg_set_active", { id });
 export const wgRestart = () => invoke<void>("wg_restart");
 export const wgStatus = (light = false) => invoke<WgStatus>("wg_status", { light });
-export const wgCheck = () => invoke<number>("wg_check");
+/** Check the tunnel now: what answered (rejects with why not). */
+export const wgCheck = () => invoke<string>("wg_check");
 export const wgMigrationOffer = () => invoke<WgMigration | null>("wg_migration_offer");
 export const wgMigrate = () => invoke<void>("wg_migrate");
 

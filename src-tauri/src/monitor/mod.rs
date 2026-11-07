@@ -129,17 +129,26 @@ fn watch_tunnel(app: &AppHandle, strikes: &mut Strikes) {
             return;
         }
     }
-    // Only when internet traffic goes into the tunnel: a home-network-only tunnel can't
-    // reach the test URL by design.
-    if !crate::wireguard::internet_through_tunnel(app) {
+    // Internet through the tunnel: a test URL; only its own networks: hosts behind it.
+    // The UI shows "connected" only from a check that answered.
+    let was = wg.alive();
+    let check = crate::wireguard::check_tunnel(app);
+    let Some(ok) = check.ok else {
+        strikes.wg = 0;
+        return;
+    };
+    // The change goes to the log, once (not every 15 s).
+    if was != Some(ok) && (was.is_some() || !ok) {
+        let line = format!("WireGuard: {}", check.text);
+        let _ = app.emit("app://log", line);
+    }
+    if ok {
         strikes.wg = 0;
         return;
     }
-    let tag = ttcm_core::wireguard::WG_TAG;
-    let ok = crate::diag::clash_delay_via(tag, "http://www.gstatic.com/generate_204", 5000).is_some();
-    // The UI shows "connected" only from a check that answered.
-    wg.set_health(ok);
-    if ok {
+    // A home-network-only tunnel being down doesn't touch the internet: keep it (it
+    // comes back by itself when the server does), just show it.
+    if !check.internet {
         strikes.wg = 0;
         return;
     }

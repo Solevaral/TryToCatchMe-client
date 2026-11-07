@@ -131,7 +131,7 @@ export default function WireGuardPage() {
   async function doCheck() {
     setCheck("проверяю…");
     try {
-      setCheck(`связь есть, ${await wgCheck()} мс`);
+      setCheck(await wgCheck());
     } catch (e) {
       setCheck(errorText(e));
     }
@@ -325,15 +325,24 @@ export default function WireGuardPage() {
               — «{running.name}», сервер {status?.endpoint ?? "—"}
             </div>
             {status?.checkable && status.checked_ago != null && (
-              <div className="muted" style={{ fontSize: 12, marginTop: 2 }}>
-                {status.alive ? "Ответ через туннель получен" : "Запрос через туннель не прошёл"} {status.checked_ago} с
-                назад (проверка каждые 15 с).
-                {status.alive === false && " Если не пройдёт ~45 с, клиент временно отключит туннель, чтобы не пропал интернет."}
+              <div style={{ fontSize: 12, marginTop: 2, color: status.alive ? undefined : "var(--err)" }} className={status.alive ? "muted" : undefined}>
+                {status.detail ?? (status.alive ? "Ответ через туннель получен" : "Запрос через туннель не прошёл")} —{" "}
+                {status.checked_ago} с назад (проверка каждые 15 с).
+                {status.alive === false &&
+                  (status.check_kind === "internet"
+                    ? " Если не пройдёт ~45 с, клиент временно отключит туннель, чтобы не пропал интернет."
+                    : " Интернет от туннеля не зависит — туннель остаётся включённым и заработает, когда сервер ответит.")}
               </div>
             )}
-            {!status?.checkable && (
+            {status?.checkable && status.check_kind === "networks" && (
               <div className="muted" style={{ fontSize: 12, marginTop: 2 }}>
-                Через туннель идут только его сети — связь не проверяется (нечем: интернет идёт мимо него).
+                Проверка: запрос к первым адресам сетей туннеля (роутер/сервер) — ответ или отказ значит, что
+                рукопожатие есть и сети за туннелем доступны.
+              </div>
+            )}
+            {status && !status.checkable && (
+              <div className="muted" style={{ fontSize: 12, marginTop: 2 }}>
+                Проверять нечего: у туннеля нет своих сетей, а интернет идёт мимо него.
               </div>
             )}
             <div className="muted" style={{ fontSize: 13, marginTop: 4 }}>
@@ -355,8 +364,8 @@ export default function WireGuardPage() {
           <div className="muted">Встроенный WireGuard выключен.</div>
         )}
         <div className="muted" style={{ fontSize: 12, marginTop: 8 }}>
-          Ядро не сообщает время последнего рукопожатия — «Проверить связь» делает запрос через
-          туннель: ответ означает, что туннель работает.
+          Ядро не сообщает время последнего рукопожатия, поэтому «Подключён» показывается только после
+          ответа через туннель. «Проверить связь» делает такой запрос сразу.
         </div>
         {running && !settings.capture_tun && tunnelNets(running).length > 0 && (
           <div style={{ fontSize: 12, marginTop: 8, color: "var(--warn)" }}>

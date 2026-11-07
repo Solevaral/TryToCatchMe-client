@@ -7,11 +7,14 @@
 //! config.json anyway while connected.
 
 use std::fs;
+use std::net::{Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
+use std::time::Instant;
 
 use parking_lot::Mutex;
 use serde::Serialize;
 use tauri::{AppHandle, Manager, State};
+use ttcm_core::wgprobe::{self, Probe};
 use ttcm_core::wireguard::{self as wg, Migration, WgStore, WgTunnel};
 
 use crate::core::CoreState;
@@ -25,9 +28,11 @@ pub struct WgState {
     /// Why the chosen tunnel is held off right now (another copy of it is running, or it
     /// stopped answering). The choice itself stays; connecting it again clears this.
     suspended: Mutex<Option<String>>,
-    /// The last check through the running tunnel: (answered, when). Cleared when the
-    /// core restarts — "connected" in the UI only after a check answered.
-    health: Mutex<Option<(bool, std::time::Instant)>>,
+    /// The last check through the running tunnel: (answered, when, what it found).
+    /// Cleared when the core restarts — "connected" in the UI only after a check answered.
+    health: Mutex<Option<(bool, Instant, String)>>,
+    /// The host:port behind the tunnel that answered last: asked alone first next time.
+    last_target: Mutex<Option<SocketAddr>>,
 }
 
 impl WgState {
@@ -108,11 +113,24 @@ impl WgState {
     pub fn set_applied(&self, id: Option<String>) {
         *self.applied.lock() = id;
         *self.health.lock() = None;
+        *self.last_target.lock() = None;
     }
 
-    /// Record a check through the tunnel (the watchdog's or the "check" button's).
-    pub fn set_health(&self, ok: bool) {
-        *self.health.lock() = Some((ok, std::time::Instant::now()));
+    /// Record a check through the tunnel (the watchdog's or the "check" button's);
+    /// returns the previous result (None: not checked since the start).
+    pub fn set_health(&self, ok: bool, detail: String) -> Option<bool> {
+        self.health.lock().replace((ok, Instant::now(), detail)).map(|(was, _, _)| was)
+    }
+
+    /// The last check's result (None: not checked since the start).
+    pub fn alive(&self) -> Option<bool> {
+        self.health.lock().as_ref().map(|(ok, _, _)| *ok)
+    }
+
+    /// The tunnel the running core was started with.
+    fn applied_tunnel(&self) -> Option<WgTunnel> {
+        let id = self.applied.lock().clone()?;
+        self.inner.lock().tunnels.iter().find(|t| t.id == id).cloned()
     }
 
     fn with<R>(&self, app: &AppHandle, f: impl FnOnce(&mut WgStore) -> Result<R, String>) -> Result<R, String> {
@@ -272,12 +290,82 @@ pub struct WgStatus {
     pub download: u64,
     /// Why the chosen tunnel is held off (another copy running / not answering).
     pub suspended: Option<String>,
-    /// The connection can be checked: internet traffic goes through the tunnel (a
-    /// tunnel used only for its own networks has nothing to test against).
+    /// The connection can be checked: internet traffic goes through the tunnel (a test
+    /// URL), or the tunnel has networks of its own (hosts behind it are asked).
     pub checkable: bool,
-    /// The last check: answered or not, and how many seconds ago. `None`: not yet.
+    /// What the check asks: "internet" (a test URL through the tunnel) or "networks"
+    /// (hosts behind the tunnel).
+    pub check_kind: Option<String>,
+    /// The last check: answered or not, how many seconds ago, what it found. `None`: not yet.
     pub alive: Option<bool>,
     pub checked_ago: Option<u64>,
+    pub detail: Option<String>,
+}
+
+/// The outcome of one check through the running tunnel.
+pub struct Check {
+    /// Answered / didn't; `None`: the check couldn't run (nothing to ask, core's proxy
+    /// not answering) — nothing is recorded then.
+    pub ok: Option<bool>,
+    pub text: String,
+    /// Internet traffic goes through the tunnel (a failure there breaks the internet).
+    pub internet: bool,
+}
+
+/// Check the running tunnel now and record the result. Blocking (up to ~8 s).
+///
+/// Internet traffic through it: a test URL through the tunnel. Only its own networks:
+/// hosts behind it (see `ttcm_core::wgprobe`) — before, this mode wasn't checked at all
+/// and the UI said "running" even with no handshake.
+pub fn check_tunnel(app: &AppHandle) -> Check {
+    let state = app.state::<WgState>();
+    let internet = internet_through_tunnel(app);
+    let none = |text: &str| Check { ok: None, text: text.to_string(), internet };
+    if !app.state::<CoreState>().status().running {
+        return none("туннель не подключён");
+    }
+    let Some(t) = state.applied_tunnel() else {
+        return none("туннель не подключён");
+    };
+    if internet {
+        let r = crate::diag::clash_delay_via(wg::WG_TAG, "http://www.gstatic.com/generate_204", 5000);
+        let (ok, text) = match r {
+            Some(ms) => (true, format!("связь есть: интернет через туннель отвечает, {ms} мс")),
+            None => (false, "нет ответа через туннель (сервер недоступен, неверные ключи или Endpoint)".to_string()),
+        };
+        state.set_health(ok, text.clone());
+        return Check { ok: Some(ok), text, internet };
+    }
+    let targets = wgprobe::probe_targets(&t);
+    let port = app.state::<SettingsStore>().get().proxy_port;
+    let proxy = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
+    let first = *state.last_target.lock();
+    let started = Instant::now();
+    match wgprobe::probe(proxy, &targets, first, wgprobe::PROBE_WAIT) {
+        Probe::Answered(a) => {
+            *state.last_target.lock() = Some(a);
+            let ms = started.elapsed().as_millis();
+            let text = format!("связь есть: ответил {a} за туннелем, {ms} мс");
+            state.set_health(true, text.clone());
+            Check { ok: Some(true), text, internet }
+        }
+        Probe::Silent => {
+            let hosts: Vec<String> = wgprobe::probe_hosts(&t).iter().map(|h| h.to_string()).collect();
+            let text = format!(
+                "нет связи через туннель: никто за ним не ответил ({}). Скорее всего нет рукопожатия с сервером — он выключен, неверные ключи или Endpoint, либо UDP до него блокируется",
+                hosts.join(", ")
+            );
+            state.set_health(false, text.clone());
+            Check { ok: Some(false), text, internet }
+        }
+        Probe::NoProxy => none("локальный прокси ядра не отвечает — проверить нечем (перезапустите WG)"),
+        Probe::NoTargets => none("у туннеля нет своих сетей (AllowedIPs только 0.0.0.0/0) — проверять нечего"),
+    }
+}
+
+/// The running tunnel can be checked in the current mode.
+fn is_checkable(app: &AppHandle, t: &WgTunnel) -> bool {
+    internet_through_tunnel(app) || !wgprobe::probe_hosts(t).is_empty()
 }
 
 /// Internet traffic goes through the running tunnel (the modes) — so a request through
@@ -317,30 +405,38 @@ pub async fn wg_status(app: AppHandle, light: Option<bool>) -> WgStatus {
         }
     }
     let suspended = state.suspended.lock().clone();
-    let checkable = running.is_some() && internet_through_tunnel(&app);
-    let health = if running.is_some() { *state.health.lock() } else { None };
-    let alive = health.map(|(ok, _)| ok);
-    let checked_ago = health.map(|(_, at)| at.elapsed().as_secs());
-    WgStatus { running, endpoint, connections, upload, download, suspended, checkable, alive, checked_ago }
+    let tunnel = running.as_ref().and_then(|_| state.applied_tunnel());
+    let checkable = tunnel.as_ref().is_some_and(|t| is_checkable(&app, t));
+    let check_kind = checkable.then(|| if internet_through_tunnel(&app) { "internet" } else { "networks" }.to_string());
+    let health = if running.is_some() { state.health.lock().clone() } else { None };
+    let alive = health.as_ref().map(|(ok, _, _)| *ok);
+    let checked_ago = health.as_ref().map(|(_, at, _)| at.elapsed().as_secs());
+    let detail = health.map(|(_, _, d)| d);
+    WgStatus {
+        running,
+        endpoint,
+        connections,
+        upload,
+        download,
+        suspended,
+        checkable,
+        check_kind,
+        alive,
+        checked_ago,
+        detail,
+    }
 }
 
-/// Round-trip time of a request through the tunnel (proves the handshake works).
+/// Check the tunnel now (the "check" button): what answered, or why not.
 #[tauri::command]
-pub async fn wg_check(app: AppHandle) -> Result<u64, String> {
-    if app.state::<WgState>().applied.lock().is_none() || !app.state::<CoreState>().status().running {
-        return Err("туннель не подключён".into());
+pub async fn wg_check(app: AppHandle) -> Result<String, String> {
+    let c = tauri::async_runtime::spawn_blocking(move || check_tunnel(&app))
+        .await
+        .map_err(|e| format!("внутренняя ошибка: {e}"))?;
+    match c.ok {
+        Some(true) => Ok(c.text),
+        _ => Err(c.text),
     }
-    if !internet_through_tunnel(&app) {
-        return Err("через туннель сейчас идут только его сети (режим «прямой трафик — через провайдера») — проверить связь нечем".into());
-    }
-    let r = tauri::async_runtime::spawn_blocking(|| {
-        crate::diag::clash_delay_via(wg::WG_TAG, "http://www.gstatic.com/generate_204", 5000)
-    })
-    .await
-    .ok()
-    .flatten();
-    app.state::<WgState>().set_health(r.is_some());
-    r.ok_or_else(|| "нет ответа через туннель (сервер недоступен, неверные ключи или Endpoint)".into())
 }
 
 #[tauri::command]

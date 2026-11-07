@@ -15,6 +15,10 @@ cd "$work"
 
 rm -fv squashfs-root/usr/lib/libwayland-*.so*
 
+# Extracted dirs come out 0700 (mktemp, umask); appimagetool refuses to pack an AppDir
+# other users can't read — the AppImage must run for anyone.
+chmod -R a+rX squashfs-root
+
 tool="$work/appimagetool"
 curl -fsSL -o "$tool" \
   https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage

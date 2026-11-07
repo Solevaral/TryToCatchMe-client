@@ -127,13 +127,7 @@ pub fn probe_one(proxy: SocketAddr, target: SocketAddr, wait: Duration) -> Reply
     };
     let _ = s.set_nodelay(true);
     let _ = s.set_write_timeout(Some(Duration::from_secs(2)));
-    // The request goes in one write with the CONNECT: the core forwards what follows
-    // its "200" to the target once dialed — an HTTP server answers it, others usually
-    // close; either way they answer.
-    let req = format!(
-        "CONNECT {target} HTTP/1.1\r\nHost: {target}\r\n\r\nHEAD / HTTP/1.0\r\nHost: {}\r\n\r\n",
-        target.ip()
-    );
+    let req = format!("CONNECT {target} HTTP/1.1\r\nHost: {target}\r\n\r\n");
     if s.write_all(req.as_bytes()).is_err() {
         return Reply::ProxyError;
     }
@@ -170,22 +164,40 @@ pub fn probe_one(proxy: SocketAddr, target: SocketAddr, wait: Duration) -> Reply
         return Reply::Data;
     }
 
-    // Then the target.
+    // Then the target: a server that speaks first (SSH) greets us, a closed port is
+    // refused — both within a round trip. Only if it stays quiet do we send an HTTP
+    // request (a web UI answers it), so an SSH server never gets garbage to log.
+    let greeting_until = Instant::now() + greeting_wait(wait);
+    let mut asked = false;
     loop {
-        let left = deadline.saturating_duration_since(Instant::now());
-        if left.is_zero() {
+        let now = Instant::now();
+        if now >= deadline {
             return Reply::Silent;
         }
-        let _ = s.set_read_timeout(Some(left));
+        if !asked && now >= greeting_until {
+            asked = true;
+            let head = format!("HEAD / HTTP/1.0\r\nHost: {}\r\n\r\n", target.ip());
+            if s.write_all(head.as_bytes()).is_err() {
+                return Reply::Closed;
+            }
+        }
+        let until = if asked { deadline } else { greeting_until.min(deadline) };
+        let _ = s.set_read_timeout(Some(until.saturating_duration_since(now).max(Duration::from_millis(1))));
         return match s.read(&mut buf) {
             Ok(0) => Reply::Closed,
             Ok(_) => Reply::Data,
-            Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => continue,
-            Err(e) if e.kind() == ErrorKind::Interrupted => continue,
+            Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut | ErrorKind::Interrupted) => {
+                continue
+            }
             // Reset / aborted: the target (or the core on its behalf) refused.
             Err(_) => Reply::Closed,
         };
     }
+}
+
+/// How long a target gets to speak first before we send our HTTP request.
+fn greeting_wait(wait: Duration) -> Duration {
+    (wait / 3).min(Duration::from_millis(1500))
 }
 
 /// The result of asking all targets.
@@ -202,7 +214,11 @@ pub enum Probe {
 }
 
 /// Ask the targets in parallel (`first`, the one that answered last time, alone first:
-/// one connection per check while it keeps answering) and return as soon as one answers.
+/// one connection per check while it keeps answering) and return once one answers.
+///
+/// A target that answers with data is preferred over one that refused: the caller asks
+/// the returned one alone next time, and every refusal is an error line in the core's
+/// log (once every 15 s, forever, if a refusing port were remembered).
 pub fn probe(proxy: SocketAddr, targets: &[SocketAddr], first: Option<SocketAddr>, wait: Duration) -> Probe {
     if targets.is_empty() {
         return Probe::NoTargets;
@@ -221,16 +237,26 @@ pub fn probe(proxy: SocketAddr, targets: &[SocketAddr], first: Option<SocketAddr
     }
     drop(tx);
     let mut proxy_errors = 0;
-    let deadline = Instant::now() + wait + Duration::from_secs(3);
+    let mut refused: Option<SocketAddr> = None;
+    let mut deadline = Instant::now() + wait + Duration::from_secs(3);
     while let Ok((t, r)) = rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
-        if r.answered() {
-            return Probe::Answered(t);
-        }
-        if r == Reply::ProxyError {
-            proxy_errors += 1;
+        match r {
+            Reply::Data => return Probe::Answered(t),
+            Reply::Closed => {
+                if refused.is_none() {
+                    refused = Some(t);
+                    // The tunnel is up; give a talking target (a greeting, or an answer to
+                    // our HTTP request) a moment more before settling for this one.
+                    deadline = deadline.min(Instant::now() + greeting_wait(wait) + Duration::from_millis(800));
+                }
+            }
+            Reply::ProxyError => proxy_errors += 1,
+            Reply::Silent => {}
         }
     }
-    if proxy_errors == targets.len() {
+    if let Some(t) = refused {
+        Probe::Answered(t)
+    } else if proxy_errors == targets.len() {
         Probe::NoProxy
     } else {
         Probe::Silent
@@ -329,22 +355,54 @@ mod tests {
     /// sing-box), then behaves as `target` does.
     #[derive(Clone, Copy)]
     enum Fake {
+        /// Speaks first (SSH).
         Greets,
+        /// Refuses (a closed port).
         Refuses,
+        /// Quiet until asked, then answers (a web UI).
+        AnswersHttp,
+        /// Nothing at all (no handshake).
         Hangs,
         Rejects,
         DropsBeforeReply,
+        /// Like a MikroTik: 22 greets, 80/443 refuse, the rest hang.
+        Router,
     }
 
+    use std::sync::{Arc, Mutex};
+
+    /// Bytes each connection sent after its CONNECT, per target port.
+    type Sent = Arc<Mutex<Vec<(u16, Vec<u8>)>>>;
+
     fn fake_proxy(mode: Fake) -> SocketAddr {
+        fake_proxy_recording(mode).0
+    }
+
+    fn fake_proxy_recording(mode: Fake) -> (SocketAddr, Sent) {
         let l = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = l.local_addr().unwrap();
+        let sent: Sent = Arc::default();
+        let sent2 = sent.clone();
         std::thread::spawn(move || {
             for s in l.incoming() {
                 let Ok(mut s) = s else { continue };
+                let sent = sent2.clone();
                 std::thread::spawn(move || {
                     let mut buf = [0u8; 1024];
-                    let _ = s.read(&mut buf);
+                    let n = s.read(&mut buf).unwrap_or(0);
+                    let req = String::from_utf8_lossy(&buf[..n]).to_string();
+                    let port: u16 = req
+                        .split_whitespace()
+                        .nth(1)
+                        .and_then(|t| t.rsplit(':').next())
+                        .and_then(|p| p.parse().ok())
+                        .unwrap_or(0);
+                    let mode = match (mode, port) {
+                        (Fake::Router, 22) => Fake::Greets,
+                        (Fake::Router, 80 | 443) => Fake::Refuses,
+                        (Fake::Router, _) => Fake::Hangs,
+                        (m, _) => m,
+                    };
                     match mode {
                         Fake::DropsBeforeReply => return,
                         Fake::Rejects => {
@@ -354,20 +412,41 @@ mod tests {
                         _ => {}
                     }
                     let _ = s.write_all(b"HTTP/1.1 200 Connection established\r\n\r\n");
+                    let mut after = Vec::new();
+                    let _ = s.set_read_timeout(Some(Duration::from_millis(100)));
+                    fn collect(s: &mut TcpStream, after: &mut Vec<u8>, for_ms: u64) {
+                        let mut buf = [0u8; 1024];
+                        let until = Instant::now() + Duration::from_millis(for_ms);
+                        while Instant::now() < until {
+                            match s.read(&mut buf) {
+                                Ok(0) => break,
+                                Ok(n) => after.extend_from_slice(&buf[..n]),
+                                Err(_) => {}
+                            }
+                        }
+                    }
                     match mode {
                         Fake::Greets => {
                             std::thread::sleep(Duration::from_millis(50));
                             let _ = s.write_all(b"SSH-2.0-ROSSSH\r\n");
-                            std::thread::sleep(Duration::from_millis(200));
+                            collect(&mut s, &mut after, 400);
                         }
                         Fake::Refuses => std::thread::sleep(Duration::from_millis(50)),
-                        Fake::Hangs => std::thread::sleep(Duration::from_secs(5)),
+                        Fake::AnswersHttp => {
+                            let until = Instant::now() + Duration::from_secs(3);
+                            while Instant::now() < until && !after.windows(4).any(|w| w == b"\r\n\r\n") {
+                                collect(&mut s, &mut after, 100);
+                            }
+                            let _ = s.write_all(b"HTTP/1.0 200 OK\r\n\r\n");
+                        }
+                        Fake::Hangs => collect(&mut s, &mut after, 3000),
                         _ => {}
                     }
+                    sent.lock().unwrap().push((port, after));
                 });
             }
         });
-        addr
+        (addr, sent)
     }
 
     fn target() -> SocketAddr {
@@ -379,6 +458,44 @@ mod tests {
     #[test]
     fn greeting_means_answered() {
         assert_eq!(probe_one(fake_proxy(Fake::Greets), target(), WAIT), Reply::Data);
+    }
+
+    #[test]
+    fn a_server_that_speaks_first_gets_no_request() {
+        let (proxy, sent) = fake_proxy_recording(Fake::Greets);
+        assert_eq!(probe_one(proxy, target(), WAIT), Reply::Data);
+        std::thread::sleep(Duration::from_millis(500));
+        let sent = sent.lock().unwrap();
+        assert_eq!(sent.len(), 1);
+        assert!(sent[0].1.is_empty(), "sent to SSH: {:?}", String::from_utf8_lossy(&sent[0].1));
+    }
+
+    #[test]
+    fn a_quiet_server_is_asked_over_http() {
+        let (proxy, sent) = fake_proxy_recording(Fake::AnswersHttp);
+        let t: SocketAddr = "10.6.0.1:80".parse().unwrap();
+        assert_eq!(probe_one(proxy, t, WAIT), Reply::Data);
+        std::thread::sleep(Duration::from_millis(200));
+        let sent = sent.lock().unwrap();
+        assert!(String::from_utf8_lossy(&sent[0].1).starts_with("HEAD / HTTP/1.0"));
+    }
+
+    #[test]
+    fn a_target_that_talks_is_preferred_over_one_that_refuses() {
+        let targets = probe_targets(&tunnel(&[], &["10.6.0.0/24", "192.168.10.0/24"]));
+        // 80/443 refuse at once, 22 greets a little later: 22 is the one to remember.
+        match probe(fake_proxy(Fake::Router), &targets, None, WAIT) {
+            Probe::Answered(t) => assert_eq!(t.port(), 22, "remembered {t}"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn only_refusals_still_mean_the_tunnel_is_up() {
+        let targets = probe_targets(&tunnel(&[], &["10.6.0.0/24"]));
+        let start = Instant::now();
+        assert!(matches!(probe(fake_proxy(Fake::Refuses), &targets, None, WAIT), Probe::Answered(_)));
+        assert!(start.elapsed() < WAIT * 3, "took {:?}", start.elapsed());
     }
 
     #[test]

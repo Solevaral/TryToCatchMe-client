@@ -9,7 +9,7 @@ use std::io::{BufRead, BufReader, Read};
 use std::net::TcpStream;
 use std::path::PathBuf;
 use std::process::{Child, Command};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -37,6 +37,45 @@ pub struct CoreState {
     /// and the watchdogs can all ask at once, and two interleaved starts left two cores
     /// fighting over the ports ("9090 занят"). Re-entrant: restart = stop + start.
     op: ReentrantMutex<()>,
+    /// Coalesces `apply` calls that pile up behind `op`.
+    applies: ApplyQueue,
+}
+
+/// `apply` requests and which of them a finished (re)start already covers.
+///
+/// A start reads the VPN / tunnel / settings state once it holds `op`, so it satisfies
+/// every request made before that moment. A request still waiting behind it then has
+/// nothing left to do — without this, the app's start-up (the tunnel left on, and the
+/// All in One host's "connect" a moment later) restarted the core twice in 3 s, dropping
+/// connections and flipping the system proxy off and on.
+#[derive(Default)]
+struct ApplyQueue {
+    /// Requests so far (each caller takes the next number before waiting for `op`).
+    requested: AtomicU64,
+    /// Every request up to this number is covered by a successful apply.
+    covered: AtomicU64,
+}
+
+impl ApplyQueue {
+    /// Take a number — after changing what the core should run, before waiting for `op`.
+    fn ticket(&self) -> u64 {
+        self.requested.fetch_add(1, Ordering::SeqCst) + 1
+    }
+
+    /// Holding `op`: a later apply already ran with state at least as new as this one's.
+    fn is_covered(&self, ticket: u64) -> bool {
+        self.covered.load(Ordering::SeqCst) >= ticket
+    }
+
+    /// Holding `op`, before reading the state: the requests this apply will cover.
+    fn begin(&self) -> u64 {
+        self.requested.load(Ordering::SeqCst)
+    }
+
+    /// After a successful apply.
+    fn finish(&self, upto: u64) {
+        self.covered.fetch_max(upto, Ordering::SeqCst);
+    }
 }
 
 #[derive(Default)]
@@ -57,6 +96,7 @@ pub struct CoreStatus {
 /// it stops. Blocking — call off the UI thread.
 pub fn apply(app: &AppHandle) -> Result<(), String> {
     let core = app.state::<CoreState>();
+    let ticket = core.applies.ticket();
     let vpn = core.vpn.load(Ordering::SeqCst);
     // Tunnel alone: don't start a core for a tunnel that can't run (start() would only
     // find the conflict after the system proxy / TUN are already set up).
@@ -74,6 +114,16 @@ pub fn apply(app: &AppHandle) -> Result<(), String> {
     // Decide and act as one step: nothing else may start or stop the core in between.
     let _op = core.op.lock();
     let want = core.vpn.load(Ordering::SeqCst) || app.state::<WgState>().active().is_some();
+    if core.applies.is_covered(ticket) && want == core.status().running {
+        // Already (re)started with this state while we waited: just bring back the
+        // monitor and the UI streams stopped above.
+        if want {
+            streams.start(app.clone());
+            monitor.start(app.clone());
+        }
+        return Ok(());
+    }
+    let upto = core.applies.begin();
     if want {
         if core.status().running {
             core.restart(app)?;
@@ -85,7 +135,65 @@ pub fn apply(app: &AppHandle) -> Result<(), String> {
     } else {
         core.stop(app)?;
     }
+    core.applies.finish(upto);
     Ok(())
+}
+
+#[cfg(test)]
+mod apply_queue_tests {
+    use super::ApplyQueue;
+
+    #[test]
+    fn a_lone_request_is_not_covered() {
+        let q = ApplyQueue::default();
+        let t = q.ticket();
+        assert!(!q.is_covered(t));
+    }
+
+    #[test]
+    fn request_made_before_a_start_is_covered_by_it() {
+        let q = ApplyQueue::default();
+        // Start-up tunnel and the host's "connect" both ask before either runs.
+        let tunnel = q.ticket();
+        let connect = q.ticket();
+        // The tunnel's apply gets the lock first and reads the state after both asked.
+        assert!(!q.is_covered(tunnel));
+        let upto = q.begin();
+        q.finish(upto);
+        // The connect request waiting behind it has nothing left to do.
+        assert!(q.is_covered(connect));
+    }
+
+    #[test]
+    fn request_made_during_a_start_is_not_covered() {
+        let q = ApplyQueue::default();
+        let first = q.ticket();
+        let upto = q.begin();
+        // A change after the running apply read the state needs its own apply.
+        let later = q.ticket();
+        q.finish(upto);
+        assert!(q.is_covered(first));
+        assert!(!q.is_covered(later));
+    }
+
+    #[test]
+    fn a_failed_start_covers_nothing() {
+        let q = ApplyQueue::default();
+        let _first = q.ticket();
+        let second = q.ticket();
+        let _upto = q.begin(); // the start fails: finish() is never called
+        assert!(!q.is_covered(second));
+    }
+
+    #[test]
+    fn coverage_never_goes_back() {
+        let q = ApplyQueue::default();
+        let a = q.ticket();
+        let b = q.ticket();
+        q.finish(2);
+        q.finish(1);
+        assert!(q.is_covered(a) && q.is_covered(b));
+    }
 }
 
 impl CoreState {

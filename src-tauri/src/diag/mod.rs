@@ -257,6 +257,20 @@ pub fn clash_get(path: &str, timeout_ms: u64) -> Option<String> {
     http_get_localhost(CLASH_CONTROLLER, path, timeout_ms)
 }
 
+/// GET a path from another local controller (the profile-test core's).
+pub fn http_get_at(authority: &str, path: &str, timeout_ms: u64) -> Option<String> {
+    http_get_localhost(authority, path, timeout_ms)
+}
+
+/// A timed request through outbound `tag` of the Clash API at `authority`.
+pub fn clash_delay_at(authority: &str, tag: &str, test_url: &str, timeout_ms: u64) -> Option<u64> {
+    let enc = test_url.replace(':', "%3A").replace('/', "%2F");
+    let path = format!("/proxies/{tag}/delay?timeout={timeout_ms}&url={enc}");
+    let body = http_get_localhost(authority, &path, timeout_ms + 1000)?;
+    let v: serde_json::Value = serde_json::from_str(&body).ok()?;
+    v.get("delay").and_then(|d| d.as_u64())
+}
+
 /// Minimal HTTP/1.0 GET against a localhost endpoint; returns the response body.
 fn http_get_localhost(authority: &str, path: &str, timeout_ms: u64) -> Option<String> {
     let socket = authority.to_socket_addrs().ok()?.next()?;
@@ -285,10 +299,23 @@ fn adapter_suffix(r: &RouteCandidate) -> String {
 
 /// Windows: the real router among default routes — physical adapter, lowest metric —
 /// so VPN/virtual adapters (Radmin VPN, Hamachi, Wintun, …) aren't mistaken for it.
-#[cfg(windows)]
 fn default_gateway() -> Option<(String, String)> {
+    let routes = default_routes();
+    pick_gateway(&routes).map(|r| (r.gateway.clone(), adapter_suffix(r)))
+}
+
+/// The physical adapter that carries internet traffic, by the name sing-box's
+/// `bind_interface` takes — never a VPN / virtual one (None then).
+pub fn physical_uplink() -> Option<String> {
+    ttcm_core::gateway::physical_gateway(&default_routes()).map(|r| r.adapter.clone())
+}
+
+/// The system's IPv4 default routes.
+#[cfg(windows)]
+fn default_routes() -> Vec<RouteCandidate> {
     use std::os::windows::process::CommandExt;
-    const QUERY: &str = "Get-NetRoute -DestinationPrefix 0.0.0.0/0 -AddressFamily IPv4 -ErrorAction SilentlyContinue | ForEach-Object { $a = Get-NetAdapter -InterfaceIndex $_.ifIndex -ErrorAction SilentlyContinue; '{0}|{1}|{2}|{3}' -f $_.NextHop, ($_.RouteMetric + $_.InterfaceMetric), $a.Name, $a.InterfaceDescription }";
+    // UTF-8: adapter names may be localized («Беспроводная сеть») and are used verbatim.
+    const QUERY: &str = "[Console]::OutputEncoding = [Text.Encoding]::UTF8; Get-NetRoute -DestinationPrefix 0.0.0.0/0 -AddressFamily IPv4 -ErrorAction SilentlyContinue | ForEach-Object { $a = Get-NetAdapter -InterfaceIndex $_.ifIndex -ErrorAction SilentlyContinue; '{0}|{1}|{2}|{3}' -f $_.NextHop, ($_.RouteMetric + $_.InterfaceMetric), $a.Name, $a.InterfaceDescription }";
     let mut ps = Command::new("powershell");
     ps.args(["-NoProfile", "-NonInteractive", "-Command", QUERY]);
     ps.creation_flags(0x0800_0000);
@@ -306,15 +333,17 @@ fn default_gateway() -> Option<(String, String)> {
             .map(|o| parse_route_print(&String::from_utf8_lossy(&o.stdout)))
             .unwrap_or_default();
     }
-    pick_gateway(&routes).map(|r| (r.gateway.clone(), adapter_suffix(r)))
+    routes
 }
 
-/// Linux: `ip route show default`, skipping tun/wg/docker/… interfaces.
+/// Linux: `ip route show default` (tun/wg/docker/… are skipped by the pickers).
 #[cfg(not(windows))]
-fn default_gateway() -> Option<(String, String)> {
-    let out = Command::new("ip").args(["route", "show", "default"]).output().ok()?;
-    let routes = parse_linux_routes(&String::from_utf8_lossy(&out.stdout));
-    pick_gateway(&routes).map(|r| (r.gateway.clone(), adapter_suffix(r)))
+fn default_routes() -> Vec<RouteCandidate> {
+    Command::new("ip")
+        .args(["route", "show", "default"])
+        .output()
+        .map(|o| parse_linux_routes(&String::from_utf8_lossy(&o.stdout)))
+        .unwrap_or_default()
 }
 
 // ---------------------------------------------------------------------------

@@ -146,16 +146,6 @@ pub fn profiles_remove(app: AppHandle, store: State<'_, ProfileStore>, id: Strin
 
 /// TCP-connect latency to a profile's server (ms), or null if unreachable.
 #[tauri::command]
-pub async fn profile_ping(app: AppHandle, id: String) -> Option<u64> {
-    let ep = app.state::<ProfileStore>().endpoint_of(&id)?;
-    let addr = format!("{}:{}", ep.0, ep.1);
-    tauri::async_runtime::spawn_blocking(move || diag::tcp_connect(&addr, 4000))
-        .await
-        .ok()
-        .flatten()
-}
-
-#[tauri::command]
 pub fn profiles_set_active(
     app: AppHandle,
     store: State<'_, ProfileStore>,

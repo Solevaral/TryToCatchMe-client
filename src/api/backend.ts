@@ -237,9 +237,13 @@ export async function profilesRemove(id: string): Promise<void> {
   await invoke("profiles_remove", { id });
 }
 
-export async function profilePing(id: string): Promise<number | null> {
-  return await invoke<number | null>("profile_ping", { id });
-}
+export type PingResult =
+  | { status: "ok"; ms: number }
+  | { status: "partial"; ms: number; note: string }
+  | { status: "fail"; reason: string };
+
+/** Test every profile through its own server, past the active VPN. Keys: profile ids. */
+export const profilesPingAll = () => invoke<Record<string, PingResult>>("profiles_ping_all");
 
 export async function profilesSetActive(id: string | null): Promise<void> {
   await invoke("profiles_set_active", { id });

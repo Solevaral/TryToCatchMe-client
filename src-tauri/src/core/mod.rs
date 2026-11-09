@@ -1009,7 +1009,7 @@ fn pipe_logs<R: Read + Send + 'static>(app: AppHandle, reader: R, tail: LogTail)
 }
 
 /// Resolve the sing-box binary: bundled resource first, dev source tree as fallback.
-fn resolve_singbox(app: &AppHandle) -> Result<PathBuf, String> {
+pub(crate) fn resolve_singbox(app: &AppHandle) -> Result<PathBuf, String> {
     let name = if cfg!(windows) {
         "binaries/sing-box.exe"
     } else {
@@ -1046,11 +1046,11 @@ fn terminate(child: &mut Child) {
 
 /// Prevent a console window from flashing when spawning the child on Windows.
 #[cfg(windows)]
-fn no_window(cmd: &mut Command) {
+pub(crate) fn no_window(cmd: &mut Command) {
     use std::os::windows::process::CommandExt;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     cmd.creation_flags(CREATE_NO_WINDOW);
 }
 
 #[cfg(not(windows))]
-fn no_window(_cmd: &mut Command) {}
+pub(crate) fn no_window(_cmd: &mut Command) {}

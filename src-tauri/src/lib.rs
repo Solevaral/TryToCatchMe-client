@@ -18,6 +18,7 @@ pub mod diag;
 pub mod geo;
 pub mod hostlink;
 pub mod library;
+pub mod pingall;
 pub mod platform;
 pub mod monitor;
 pub mod profiles;
@@ -160,7 +161,7 @@ pub fn run() {
             commands::is_admin,
             commands::relaunch_admin,
             commands::diag_run,
-            commands::profile_ping,
+            pingall::profiles_ping_all,
         ])
         .build(tauri::generate_context!())
         .expect("error while building TryToCatchMe application")

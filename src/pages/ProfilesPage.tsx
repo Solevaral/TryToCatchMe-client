@@ -8,13 +8,14 @@ import {
   profilesImport,
   profilesRemove,
   profilesSetActive,
-  profilePing,
+  profilesPingAll,
   subscriptionsList,
   subscriptionUpdate,
   subscriptionRemove,
   type Profile,
   type Subscription,
   type ImportResult,
+  type PingResult,
 } from "../api/backend";
 
 const PROTO_ICON: Record<string, string> = {
@@ -60,15 +61,18 @@ export default function ProfilesPage() {
   const [updating, setUpdating] = useState<string | null>(null);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [notice, setNotice] = useState<string>("");
-  const [pings, setPings] = useState<Record<string, number | null | "...">>({});
+  const [pings, setPings] = useState<Record<string, PingResult>>({});
+  const [pinging, setPinging] = useState(false);
 
-  async function pingOne(id: string) {
-    setPings((p) => ({ ...p, [id]: "..." }));
+  async function pingAll() {
+    setPinging(true);
+    setNotice("");
     try {
-      const ms = await profilePing(id);
-      setPings((p) => ({ ...p, [id]: ms }));
-    } catch {
-      setPings((p) => ({ ...p, [id]: null }));
+      setPings(await profilesPingAll());
+    } catch (e) {
+      setNotice(String(e));
+    } finally {
+      setPinging(false);
     }
   }
 
@@ -203,7 +207,16 @@ export default function ProfilesPage() {
         <button className="btn" onClick={pasteFromClipboard}>
           📋 Вставить ссылку из буфера
         </button>
+        <button className="btn" onClick={pingAll} disabled={pinging || profiles.length === 0}>
+          {pinging ? "Пинг…" : "📶 Пинг"}
+        </button>
       </div>
+
+      {pinging && (
+        <div className="muted" style={{ marginBottom: 12, fontSize: 13 }}>
+          Проверяю каждый сервер напрямую, мимо активного VPN (до ~15 с)…
+        </div>
+      )}
 
       {notice && (
         <div className="muted" style={{ marginBottom: 12, fontSize: 13 }}>
@@ -251,68 +264,70 @@ export default function ProfilesPage() {
             Список профилей пуст. Скопируйте ссылку подключения или подписки и нажмите «Вставить из буфера».
           </div>
         ) : (
-          profiles.map((p) => (
-            <div
-              key={p.id}
-              onClick={() => selectActive(p.id)}
-              style={{
-                display: "flex",
-                alignItems: "center",
-                gap: 12,
-                padding: "10px 12px",
-                borderRadius: 8,
-                cursor: "pointer",
-                background: p.id === activeId ? "var(--bg-2)" : "transparent",
-                border:
-                  p.id === activeId ? "1px solid var(--accent)" : "1px solid transparent",
-              }}
-            >
-              <span style={{ width: 20, textAlign: "center" }}>
-                {PROTO_ICON[p.protocol] ?? "•"}
-              </span>
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ fontWeight: 550 }}>{p.name}</div>
-                <div className="muted" style={{ fontSize: 12 }}>
-                  {p.protocol} · {p.server}:{p.port} · {transportLabel(p)}
+          profiles.map((p) => {
+            const result = pings[p.id];
+            return (
+              <div
+                key={p.id}
+                onClick={() => selectActive(p.id)}
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 12,
+                  padding: "10px 12px",
+                  borderRadius: 8,
+                  cursor: "pointer",
+                  background: p.id === activeId ? "var(--bg-2)" : "transparent",
+                  border:
+                    p.id === activeId ? "1px solid var(--accent)" : "1px solid transparent",
+                }}
+              >
+                <span style={{ width: 20, textAlign: "center" }}>
+                  {PROTO_ICON[p.protocol] ?? "•"}
+                </span>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontWeight: 550 }}>{p.name}</div>
+                  <div className="muted" style={{ fontSize: 12 }}>
+                    {p.protocol} · {p.server}:{p.port} · {transportLabel(p)}
+                  </div>
                 </div>
+                <span
+                  className="muted"
+                  style={{
+                    fontSize: 12,
+                    minWidth: 62,
+                    textAlign: "right",
+                    color: pinging || !result ? undefined
+                      : result.status === "ok" ? "var(--ok)"
+                      : result.status === "partial" ? "var(--warn)" : "var(--err)",
+                  }}
+                  title={pinging || !result ? undefined
+                    : result.status === "partial" ? result.note
+                    : result.status === "fail" ? result.reason : undefined}
+                >
+                  {pinging
+                    ? "…"
+                    : result?.status === "ok"
+                    ? `${result.ms} ms`
+                    : result?.status === "partial"
+                    ? `${result.ms} ms ⚠`
+                    : result?.status === "fail"
+                    ? "нет связи"
+                    : ""}
+                </span>
+                <button
+                  className="btn"
+                  style={{ padding: "4px 10px" }}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    remove(p.id);
+                  }}
+                >
+                  Удалить
+                </button>
               </div>
-              <span
-                className="muted"
-                style={{ fontSize: 12, minWidth: 62, textAlign: "right" }}
-              >
-                {pings[p.id] === "..."
-                  ? "…"
-                  : pings[p.id] === null
-                  ? "недоступ."
-                  : typeof pings[p.id] === "number"
-                  ? `${pings[p.id]} ms`
-                  : ""}
-              </span>
-              <button
-                className="btn"
-                style={{ padding: "4px 10px" }}
-                // The ping is a TCP connect; Hysteria2 servers listen on UDP only.
-                disabled={p.protocol === "hysteria2"}
-                title={p.protocol === "hysteria2" ? "Hysteria2 работает по UDP — TCP-пинг к нему неприменим" : undefined}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  pingOne(p.id);
-                }}
-              >
-                Пинг
-              </button>
-              <button
-                className="btn"
-                style={{ padding: "4px 10px" }}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  remove(p.id);
-                }}
-              >
-                Удалить
-              </button>
-            </div>
-          ))
+            );
+          })
         )}
       </div>
     </div>

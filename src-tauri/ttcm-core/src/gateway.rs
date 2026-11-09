@@ -46,6 +46,17 @@ pub fn pick_gateway(routes: &[RouteCandidate]) -> Option<&RouteCandidate> {
         .copied()
 }
 
+/// The physical adapter's default route only (lowest metric, named adapter) — None when
+/// every default route is a VPN / virtual one. For binding traffic that must not go
+/// through any VPN.
+pub fn physical_gateway(routes: &[RouteCandidate]) -> Option<&RouteCandidate> {
+    routes
+        .iter()
+        .filter(|r| r.gateway.parse::<std::net::Ipv4Addr>().is_ok_and(|g| !g.is_unspecified()))
+        .filter(|r| !r.adapter.is_empty() && !is_virtual(&r.adapter, &r.description))
+        .min_by_key(|r| r.metric)
+}
+
 /// Parse `gateway|metric|adapter|description` lines (produced by a PowerShell query).
 pub fn parse_windows_routes(text: &str) -> Vec<RouteCandidate> {
     text.lines()
@@ -101,6 +112,28 @@ pub fn parse_linux_routes(text: &str) -> Vec<RouteCandidate> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn physical_gateway_is_the_real_card() {
+        // This machine: Radmin VPN has the better interface metric, Ethernet the route.
+        let routes = parse_windows_routes(
+            "26.0.0.1|9257|Radmin VPN|Famatech Radmin VPN Ethernet Adapter\n192.168.31.1|25|Ethernet|Realtek PCIe GbE Family Controller",
+        );
+        assert_eq!(physical_gateway(&routes).unwrap().adapter, "Ethernet");
+        let wifi = parse_windows_routes("192.168.1.1|35|Беспроводная сеть|Intel(R) Wi-Fi 6 AX201");
+        assert_eq!(physical_gateway(&wifi).unwrap().adapter, "Беспроводная сеть");
+    }
+
+    #[test]
+    fn physical_gateway_never_falls_back_to_a_vpn() {
+        let routes = parse_windows_routes(
+            "26.0.0.1|1|Radmin VPN|Famatech Radmin VPN Ethernet Adapter\n0.0.0.0|0|tun0|Wintun Userspace Tunnel\n10.6.0.1|5|rodoro|WireGuard Tunnel",
+        );
+        assert!(physical_gateway(&routes).is_none());
+        // `route print` rows have no adapter name: nothing to bind to.
+        let unnamed = vec![RouteCandidate { gateway: "192.168.31.1".into(), metric: 25, adapter: String::new(), description: String::new() }];
+        assert!(physical_gateway(&unnamed).is_none());
+    }
 
     #[test]
     fn skips_radmin_vpn_on_windows() {

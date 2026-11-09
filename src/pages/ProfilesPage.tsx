@@ -133,8 +133,14 @@ export default function ProfilesPage() {
 
   async function removeSubscription(s: Subscription) {
     if (!window.confirm(`Удалить подписку «${s.name}» вместе с её серверами?`)) return;
-    await subscriptionRemove(s.id);
-    await refresh();
+    try {
+      const removesActive = profiles.some((p) => p.id === activeId && p.subscription === s.id);
+      await subscriptionRemove(s.id);
+      await refresh();
+      if (removesActive && connected) await restart();
+    } catch (e) {
+      setNotice(String(e));
+    }
   }
 
   async function pasteFromClipboard() {
@@ -154,16 +160,25 @@ export default function ProfilesPage() {
   }
 
   async function selectActive(id: string) {
-    if (id === activeId) return;
-    await profilesSetActive(id);
-    setActiveId(id);
-    // Apply immediately — otherwise the tunnel keeps using the old server.
-    if (connected) await restart();
+    if (id === activeId || busy) return;
+    try {
+      await profilesSetActive(id);
+      setActiveId(id);
+      // Apply immediately — otherwise the tunnel keeps using the old server.
+      if (connected) await restart();
+    } catch (e) {
+      setNotice(String(e));
+    }
   }
 
   async function remove(id: string) {
-    await profilesRemove(id);
-    await refresh();
+    try {
+      await profilesRemove(id);
+      await refresh();
+      if (id === activeId && connected) await restart();
+    } catch (e) {
+      setNotice(String(e));
+    }
   }
 
   const active = profiles.find((p) => p.id === activeId) || null;

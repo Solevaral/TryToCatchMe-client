@@ -393,7 +393,7 @@ impl RoutingStore {
             for sel in &p.config.services {
                 let Some(svc) = p.catalog.iter().find(|s| s.id == sel.id) else { continue };
                 if let Some(g) = &svc.geosite {
-                    if sel.action != "direct" && !plan.service_geosites.contains(g) {
+                    if !plan.service_geosites.contains(g) {
                         plan.service_geosites.push(g.clone());
                     }
                 }
@@ -426,6 +426,18 @@ impl RoutingStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn direct_services_also_download_their_domain_lists() {
+        let store = RoutingStore::default();
+        store.with(|p| {
+            let mut service = svc("custom", "Direct", &["example.invalid"]);
+            service.geosite = Some("custom-list".into());
+            p.catalog = vec![service];
+            p.config.services = vec![ttcm_core::routing::ServiceSel { id: "custom".into(), action: "direct".into(), profile: None }];
+        });
+        assert_eq!(store.plan().service_geosites, ["custom-list"]);
+    }
 
     fn svc(id: &str, name: &str, domains: &[&str]) -> Service {
         Service {

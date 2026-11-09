@@ -58,6 +58,19 @@ mod tests {
     use super::*;
 
     #[test]
+    fn bypass_lists_cover_lan_without_duplicates() {
+        let windows: Vec<_> = WINDOWS_BYPASS.split(';').collect();
+        let unique: std::collections::HashSet<_> = windows.iter().collect();
+        assert_eq!(windows.len(), unique.len());
+        assert!(windows.contains(&"<local>"));
+        assert!(!WINDOWS_BYPASS.contains(','));
+        for subnet in 16..=31 { assert!(windows.contains(&format!("172.{subnet}.*").as_str())); }
+        assert!(GNOME_BYPASS.contains("172.16.0.0/12"));
+        assert!(!windows_server_points_to("127.0.0.1:20800", "127.0.0.1", 2080));
+        assert!(!windows_server_points_to("http=;https=", "127.0.0.1", 2080));
+    }
+
+    #[test]
     fn windows_server_forms() {
         assert!(windows_server_points_to("127.0.0.1:2080", "127.0.0.1", 2080));
         assert!(windows_server_points_to("http://127.0.0.1:2080", "127.0.0.1", 2080));

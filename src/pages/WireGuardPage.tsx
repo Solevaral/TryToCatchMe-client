@@ -212,8 +212,10 @@ export default function WireGuardPage() {
               ? ["приостановлен", "var(--warn)"]
               : up && status?.checkable && status.alive === false
               ? ["нет связи", "var(--err)"]
+              : up && status?.checkable && status.alive === null
+              ? ["проверяю связь…", "var(--warn)"]
               : up
-              ? ["подключён", "var(--ok)"]
+              ? [status?.checkable ? "подключён" : "запущен", "var(--ok)"]
               : ["выбран, не запущен", "var(--warn)"];
             return (
               <div

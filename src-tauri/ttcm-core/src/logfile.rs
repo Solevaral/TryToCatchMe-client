@@ -58,6 +58,14 @@ mod tests {
     use super::*;
 
     #[test]
+    fn unicode_messages_and_malformed_entries_are_handled_without_truncation() {
+        let text = "я".repeat(MAX_BYTES as usize / 2 + 1);
+        assert_eq!(lines_for_event("app://error", &text), [format!("[error] {text}")]);
+        let batch = serde_json::json!([null, 1, {}, {"type":"error"}, {"type":"error", "payload":"Ошибка 🇧🇾"}]);
+        assert_eq!(lines_for_event("clash://log", &batch.to_string()), ["[core:error] Ошибка 🇧🇾"]);
+    }
+
+    #[test]
     fn stamps_are_utc_civil_time() {
         assert_eq!(utc_stamp(0, 0), "1970-01-01 00:00:00.000Z");
         // 2026-10-26 16:56:27 UTC

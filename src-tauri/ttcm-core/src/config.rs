@@ -217,8 +217,9 @@ pub fn has_global_ipv6(if_inet6: &str) -> bool {
         let f: Vec<&str> = line.split_whitespace().collect();
         // address, ifindex, prefix length, scope, flags, interface
         let [addr, _, _, scope, _, iface] = f[..] else { return false };
-        let ula = addr.len() == 32 && matches!(&addr[..2], "fc" | "fd");
-        scope == "00" && !ula && iface != "lo" && iface != TUN_IFACE_LINUX
+        let global = addr.len() == 32
+            && u128::from_str_radix(addr, 16).is_ok_and(|ip| ip >> 125 == 1);
+        scope == "00" && global && iface != "lo" && iface != TUN_IFACE_LINUX
             && !crate::gateway::is_virtual(iface, "")
     })
 }
@@ -620,6 +621,120 @@ fn to_action_rule(rule: &Value) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn assert_config_references(cfg: &Value) {
+        use std::collections::HashSet;
+        let objects = |key: &str| cfg[key].as_array().cloned().unwrap_or_default();
+        let inbounds = objects("inbounds");
+        let outbounds = objects("outbounds");
+        let endpoints = objects("endpoints");
+        let mut all_tags = HashSet::new();
+        for item in inbounds.iter().chain(&outbounds).chain(&endpoints) {
+            assert!(all_tags.insert(item["tag"].as_str().unwrap()), "duplicate tag {item}");
+            assert!(!["dns", "block"].contains(&item["type"].as_str().unwrap()));
+        }
+        let outbound_tags: HashSet<_> = outbounds.iter().chain(&endpoints).map(|o| o["tag"].as_str().unwrap()).collect();
+        let inbound_tags: HashSet<_> = inbounds.iter().map(|o| o["tag"].as_str().unwrap()).collect();
+        let dns = cfg["dns"]["servers"].as_array().unwrap();
+        let dns_tags: HashSet<_> = dns.iter().map(|s| s["tag"].as_str().unwrap()).collect();
+        assert_eq!(dns.len(), dns_tags.len());
+        let sets: HashSet<_> = cfg["route"]["rule_set"].as_array().into_iter().flatten().map(|s| s["tag"].as_str().unwrap()).collect();
+        fn walk(v: &Value, out: &HashSet<&str>, ins: &HashSet<&str>, dns: &HashSet<&str>, sets: &HashSet<&str>) {
+            match v {
+                Value::Object(obj) => {
+                    for (key, value) in obj {
+                        match key.as_str() {
+                            "outbound" | "detour" => assert!(out.contains(value.as_str().unwrap()), "unknown {key}: {value}"),
+                            "domain_resolver" | "default_domain_resolver" => {
+                                let tag = value.as_str().or_else(|| value["server"].as_str()).unwrap();
+                                assert!(dns.contains(tag));
+                            }
+                            "inbound" | "outbounds" | "rule_set" if value.as_array().is_some_and(|a| a.iter().all(Value::is_string)) => {
+                                let tags = match key.as_str() { "inbound" => ins, "outbounds" => out, _ => sets };
+                                for tag in value.as_array().unwrap() { assert!(tags.contains(tag.as_str().unwrap())); }
+                            }
+                            "geoip" | "geosite" => panic!("legacy matcher {key}"),
+                            _ => {}
+                        }
+                        walk(value, out, ins, dns, sets);
+                    }
+                }
+                Value::Array(items) => for item in items { walk(item, out, ins, dns, sets); },
+                _ => {}
+            }
+        }
+        walk(cfg, &outbound_tags, &inbound_tags, &dns_tags, &sets);
+        assert!(outbound_tags.contains(cfg["route"]["final"].as_str().unwrap()));
+        assert!(dns_tags.contains(cfg["dns"]["final"].as_str().unwrap()));
+        for rule in cfg["dns"]["rules"].as_array().unwrap() {
+            assert!(dns_tags.contains(rule["server"].as_str().unwrap()));
+        }
+        let mut ports = HashSet::new();
+        ports.insert(CLASH_CONTROLLER.rsplit(':').next().unwrap().parse::<u64>().unwrap());
+        for inbound in &inbounds {
+            assert!(inbound.get("sniff").is_none());
+            if let Some(port) = inbound["listen_port"].as_u64() { assert!(ports.insert(port)); }
+        }
+    }
+
+    #[test]
+    fn config_matrix_has_valid_references_and_rule_order() {
+        for flags in 0..256 {
+            for mode in ["rule", "global", "direct"] {
+                let mut opts = with_wg(flags & 4 != 0, flags & 8 != 0);
+                opts.tun = flags & 1 != 0;
+                opts.wg_routes = vec!["10.6.0.0/24".into()];
+                if flags & 2 == 0 { opts.wg = None; }
+                opts.dns_doh = flags & 16 != 0;
+                opts.ipv4_only = flags & 32 != 0;
+                opts.tun_ipv6 = flags & 64 != 0;
+                if flags & 128 == 0 { opts.proxy_outbound = None; }
+                let routing = crate::routing::RoutingConfig {
+                    mode: mode.into(),
+                    region: Some("ru".into()),
+                    services: vec![crate::routing::ServiceSel { id: "service".into(), action: "proxy".into(), profile: Some("p2".into()) }],
+                    rules: vec![
+                        crate::routing::Rule { kind: "domain".into(), value: "blocked.invalid".into(), action: "block".into() },
+                        crate::routing::Rule { kind: "domain_keyword".into(), value: "direct".into(), action: "direct".into() },
+                    ],
+                    ..Default::default()
+                };
+                let catalog = vec![crate::routing::Service {
+                    id: "service".into(), name: "Service".into(), icon: String::new(),
+                    domains: vec!["example.invalid".into()], ip_cidrs: vec![], geosite: Some("custom".into()),
+                }];
+                let geosites = vec!["custom".into()];
+                let geo = crate::routing::GeoInput { dir: "rules", region_ready: true, geosites: &geosites, antifilter_ready: true };
+                let spec = crate::routing::build_route(&routing, &catalog, Some(&geo));
+                opts.route_rules = spec.rules;
+                opts.rule_sets = spec.rule_sets;
+                opts.final_action = spec.final_action;
+                let cfg = generate(&opts);
+                assert_config_references(&cfg);
+                assert_eq!(cfg, generate(&opts));
+                let rules = rules(&cfg);
+                assert_eq!(rules[0]["action"], "sniff");
+                if opts.tun { assert_eq!(rules[1]["action"], "hijack-dns"); }
+                if opts.wg.is_some() {
+                    let wg_route = rules.iter().position(|r| r["ip_cidr"] == json!(opts.wg_routes)).unwrap();
+                    if let Some(lan) = rules.iter().position(|r| r["ip_is_private"] == true) { assert!(wg_route < lan); }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn malformed_ipv6_listing_is_safe_and_not_an_uplink() {
+        for addr in ["aя".repeat(10) + "aa", "0".repeat(32), "ff".repeat(16), "FDEE".to_string() + &"0".repeat(28)] {
+            assert!(!has_global_ipv6(&format!("{addr} 02 40 00 00 eth0")));
+        }
+    }
+
+    #[test]
+    #[ignore = "BUG: configured proxy port can collide with the Clash controller"]
+    fn proxy_port_must_not_collide_with_controller() {
+        assert_config_references(&generate(&GenOptions { mixed_port: 9090, ..only_youtube() }));
+    }
 
     fn proxy() -> Value {
         json!({ "type": "vless", "tag": "proxy", "server": "a.com", "server_port": 443, "uuid": "u" })

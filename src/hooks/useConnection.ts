@@ -34,34 +34,39 @@ export function useConnection() {
   );
 
   const connect = useCallback(async () => {
+    if (useAppStore.getState().status === "connecting") return;
     setStatus("connecting");
     setLastError(null);
     try {
       await coreStart();
       setStatus("connected");
-      await traySetState("connected");
+      await traySetState("connected").catch(() => {});
     } catch (e) {
       await fail(e);
     }
   }, [setStatus, setLastError, fail]);
 
+  // No "connecting" guard: Disconnect must also abort a connect that hangs.
   const disconnect = useCallback(async () => {
     setStatus("disconnected");
     setLastError(null);
     try {
       await coreStop();
-    } finally {
+      setStatus("disconnected");
       await traySetState("idle").catch(() => {});
+    } catch (e) {
+      await fail(e);
     }
-  }, [setStatus, setLastError]);
+  }, [setStatus, setLastError, fail]);
 
   const restart = useCallback(async () => {
+    if (useAppStore.getState().status === "connecting") return;
     setStatus("connecting");
     setLastError(null);
     try {
       await coreRestart();
       setStatus("connected");
-      await traySetState("connected");
+      await traySetState("connected").catch(() => {});
     } catch (e) {
       await fail(e);
     }

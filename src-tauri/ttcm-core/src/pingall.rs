@@ -20,6 +20,9 @@ pub fn build_test_config(outbounds: &[Value], uplink: Option<&str>, clash_port: 
     }
     let mut route = json!({ "final": "direct" });
     if let Some(name) = uplink {
+        // The DNS server has no detour (sing-box 1.14 rejects one to "direct"), so it
+        // uses the default dialer: pin that to the uplink too, never the VPN adapter.
+        route["default_interface"] = json!(name);
         for outbound in &mut test_outbounds {
             outbound["bind_interface"] = json!(name);
         }
@@ -30,7 +33,7 @@ pub fn build_test_config(outbounds: &[Value], uplink: Option<&str>, clash_port: 
         "log": { "level": "warn" },
         "dns": {
             "servers": [{
-                "type": "udp", "tag": "dns-direct", "server": "77.88.8.8", "detour": "direct"
+                "type": "udp", "tag": "dns-direct", "server": "77.88.8.8"
             }],
             "strategy": "ipv4_only"
         },
@@ -68,6 +71,21 @@ mod tests {
     use super::*;
 
     #[test]
+    fn bootstrap_dns_does_not_detour_to_an_empty_direct_outbound() {
+        for uplink in [None, Some("Ethernet")] {
+            let config = build_test_config(&[], uplink, 29090);
+            assert!(config["dns"]["servers"][0].get("detour").is_none());
+            assert_eq!(config["route"].get("default_interface").and_then(|v| v.as_str()), uplink);
+        }
+    }
+
+    #[test]
+    #[ignore = "BUG: non-object outbound from saved profiles panics in config generation"]
+    fn malformed_saved_outbound_does_not_panic() {
+        let _ = build_test_config(&[json!(42)], None, 29090);
+    }
+
+    #[test]
     fn generates_tags() {
         assert_eq!(test_tag(0), "t0");
         assert_eq!(test_tag(42), "t42");
@@ -101,11 +119,11 @@ mod tests {
         assert_eq!(inputs, original);
         assert!(config.get("inbounds").is_none());
         assert_eq!(config["log"], json!({"level": "warn"}));
-        assert_eq!(config["route"], json!({"final": "direct"}));
+        assert_eq!(config["route"], json!({"final": "direct", "default_interface": "Беспроводная сеть"}));
         assert_eq!(
             config["dns"],
             json!({
-                "servers": [{"type": "udp", "tag": "dns-direct", "server": "77.88.8.8", "detour": "direct"}],
+                "servers": [{"type": "udp", "tag": "dns-direct", "server": "77.88.8.8"}],
                 "strategy": "ipv4_only"
             })
         );

@@ -37,14 +37,14 @@ pub fn parse_userinfo(header: &str) -> Option<SubInfo> {
         let Some((k, v)) = part.split_once('=') else { continue };
         let Ok(n) = v.trim().parse::<f64>() else { continue };
         let n = n.max(0.0) as u64;
-        any = true;
         match k.trim().to_ascii_lowercase().as_str() {
             "upload" => info.upload = n,
             "download" => info.download = n,
             "total" => info.total = n,
             "expire" => info.expire = (n > 0).then_some(n),
-            _ => {}
+            _ => continue,
         }
+        any = true;
     }
     any.then_some(info)
 }
@@ -101,6 +101,12 @@ pub fn parse_body(body: &str) -> (Vec<Profile>, Vec<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unknown_userinfo_fields_do_not_invent_zero_usage() {
+        assert!(parse_userinfo("unrelated=42; upload=broken").is_none());
+        assert_eq!(parse_userinfo("download=42; unknown=7").unwrap().download, 42);
+    }
 
     fn b64(s: &str) -> String {
         base64::engine::general_purpose::STANDARD.encode(s)

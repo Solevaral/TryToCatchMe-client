@@ -61,3 +61,49 @@ pub fn init(app: &AppHandle) {
         });
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct TempLog(PathBuf);
+
+    impl TempLog {
+        fn new() -> Self {
+            let dir = std::env::temp_dir().join(format!("ttcm-log-test-{}", uuid::Uuid::new_v4()));
+            fs::create_dir(&dir).unwrap();
+            Self(dir)
+        }
+    }
+
+    impl Drop for TempLog {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn rotation_boundary_keeps_complete_unicode_lines() {
+        let temp = TempLog::new();
+        let path = temp.0.join("trytocatchme.log");
+        fs::write(&path, vec![b'x'; MAX_BYTES as usize]).unwrap();
+        let mut sink = Sink { path: path.clone(), file: None };
+        sink.write(&["Ошибка 🇧🇾".into()]);
+        let previous = temp.0.join("trytocatchme.1.log");
+        assert!(!previous.exists());
+        sink.write(&["Следующая строка".into()]);
+        drop(sink);
+        assert!(fs::read_to_string(previous).unwrap().ends_with("Ошибка 🇧🇾\n"));
+        let current = fs::read_to_string(path).unwrap();
+        assert!(current.ends_with("Следующая строка\n"));
+        assert!(!current.contains("Ошибка"));
+    }
+
+    #[test]
+    fn empty_batch_does_not_create_log_file() {
+        let temp = TempLog::new();
+        let path = temp.0.join("trytocatchme.log");
+        Sink { path: path.clone(), file: None }.write(&[]);
+        assert!(!path.exists());
+    }
+}

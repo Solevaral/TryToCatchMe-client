@@ -155,8 +155,8 @@ pub fn generate(rules: &[Value], final_action: &str, sets: &HashMap<String, Rule
     }
     let rules_json = Value::Array(pac_rules.into_iter().map(|(_, v)| v).collect());
     format!(
-        "// TryToCatchMe: hosts the routing sends through the VPN go to the local proxy, the rest directly.\nvar P=\"PROXY {proxy}; DIRECT\";\nvar F={};\nvar R={};{PAC_JS}",
-        final_proxy as u8, rules_json
+        "// TryToCatchMe: hosts the routing sends through the VPN go to the local proxy, the rest directly.\nvar P={};\nvar F={};\nvar R={};{PAC_JS}",
+        json!(format!("PROXY {proxy}; DIRECT")), final_proxy as u8, rules_json
     )
 }
 
@@ -168,6 +168,22 @@ pub fn direct_only() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ranges_cover_zero_and_host_prefixes_without_overflow() {
+        assert_eq!(ipv4_ranges(&["0.0.0.0/0".into(), "255.255.255.255/32".into()]), [(0, u32::MAX)]);
+        assert_eq!(ipv4_ranges(&["10.2.3.4/8".into()]), [(0x0a000000, 0x0affffff)]);
+        assert!(ipv4_ranges(&["1.2.3.4/33".into(), "::/0".into()]).is_empty());
+    }
+
+    #[test]
+    fn script_strings_are_json_escaped() {
+        let proxy = "a\"b\\c:2080";
+        let script = generate(&[json!({"domain": ["a\"b\\c.invalid"], "outbound": "proxy"})], "direct", &HashMap::new(), proxy);
+        let encoded = script.lines().find_map(|l| l.strip_prefix("var P=")).unwrap().trim_end_matches(';');
+        assert_eq!(serde_json::from_str::<String>(encoded).unwrap(), format!("PROXY {proxy}; DIRECT"));
+        assert!(script.contains("a\\\"b\\\\c.invalid"));
+    }
 
     fn sets() -> HashMap<String, RuleSetData> {
         let mut m = HashMap::new();

@@ -213,7 +213,7 @@ pub fn list_to_rule_set(kind: GeoKind, text: &str) -> Result<String, String> {
             "ip_cidr",
             lines
                 .filter(|l| l.chars().all(|c| c.is_ascii_hexdigit() || c == '.' || c == ':' || c == '/'))
-                .filter(|l| l.split('/').next().is_some_and(|ip| ip.parse::<std::net::IpAddr>().is_ok()))
+                .filter(|l| crate::config::bypass_cidr(l).is_some())
                 .map(str::to_string)
                 .collect(),
             100,
@@ -457,7 +457,7 @@ fn group_rules(rules: &[Rule]) -> Vec<((String, String), Vec<String>)> {
         let kind = sanitize_kind(&r.kind);
         let action = sanitize_action(&r.action);
         let key = (kind, action);
-        if let Some(entry) = out.iter_mut().find(|(k, _)| *k == key) {
+        if let Some(entry) = out.last_mut().filter(|(k, _)| *k == key) {
             entry.1.push(r.value.clone());
         } else {
             out.push((key, vec![r.value.clone()]));
@@ -488,6 +488,34 @@ fn sanitize_kind(k: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn grouping_preserves_first_match_precedence() {
+        let cfg = RoutingConfig {
+            rules: vec![
+                Rule { kind: "domain_suffix".into(), value: "first.invalid".into(), action: "proxy".into() },
+                Rule { kind: "domain_suffix".into(), value: "safe.example".into(), action: "direct".into() },
+                Rule { kind: "domain_suffix".into(), value: "example".into(), action: "proxy".into() },
+            ],
+            ..Default::default()
+        };
+        let spec = build_route(&cfg, &[], None);
+        assert_eq!(spec.rules[2]["domain_suffix"], json!(["safe.example"]));
+        assert_eq!(spec.rules[2]["outbound"], "direct");
+        assert_eq!(spec.rules[3]["domain_suffix"], json!(["example"]));
+        assert_eq!(spec.rules, build_route(&cfg, &[], None).rules);
+    }
+
+    #[test]
+    fn ip_lists_drop_invalid_prefixes() {
+        let valid = (0..100).map(|i| format!("10.0.0.{i}/32")).collect::<Vec<_>>().join("\n");
+        let text = format!("{valid}\n0.0.0.0/0\n2001:db8::/128\n1.1.1.1\n1.2.3.4/33\n::/129\n1.2.3.4/\n::/64/1");
+        let result: Value = serde_json::from_str(&list_to_rule_set(GeoKind::IpList, &text).unwrap()).unwrap();
+        let cidrs = result["rules"][0]["ip_cidr"].as_array().unwrap();
+        assert_eq!(cidrs.len(), 103);
+        assert!(cidrs.contains(&json!("0.0.0.0/0")));
+        assert!(cidrs.contains(&json!("2001:db8::/128")));
+    }
 
     fn catalog() -> Vec<Service> {
         vec![Service {

@@ -531,6 +531,13 @@ pub fn migration_offer(legacy: &LegacyOptions, has_tunnels: bool) -> Option<Migr
 mod tests {
     use super::*;
 
+    #[test]
+    fn routed_subnets_exclude_full_tunnels_and_keep_specific_networks() {
+        let mut t = tunnel(&sample());
+        t.peers[0].allowed_ips = ["0.0.0.0/0", "::/0", "0.0.0.0/1", "128.0.0.0/1", "::/1", "8000::/1", "10.0.0.0/8", "fd00::/64", "10.0.0.1", "10.0.0.0/8"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(routed_subnets(&t), ["10.0.0.0/8", "fd00::/64", "10.0.0.1/32"]);
+    }
+
     const K1: &str = "yAnz5TF+lXXJte14tji3zlMNq+hd2rYUIgJBgB3fBmk=";
     const K2: &str = "xTIBA5rboUvnH4htodjb6e697QjLERt1NAB4mZqp8Dg=";
     const K3: &str = "HIgo9xNzJMWLKASShiTqIybxZ0U3wGLiUeJ1PKf8ykw=";

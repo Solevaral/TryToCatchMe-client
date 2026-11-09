@@ -63,7 +63,7 @@ pub fn parse_many(text: &str) -> (Vec<Profile>, Vec<String>) {
 fn short(link: &str) -> String {
     let l = link.trim();
     if l.len() > 40 {
-        format!("{}…", &l[..40])
+        format!("{}…", l.chars().take(40).collect::<String>())
     } else {
         l.to_string()
     }
@@ -71,7 +71,7 @@ fn short(link: &str) -> String {
 
 /// Pull individual links out of raw text; decode a base64 subscription blob if needed.
 fn extract_links(text: &str) -> Vec<String> {
-    let t = text.trim();
+    let t = text.trim().trim_start_matches('\u{feff}');
     let body = if t.contains("://") {
         t.to_string()
     } else {
@@ -79,7 +79,9 @@ fn extract_links(text: &str) -> Vec<String> {
             .and_then(|b| String::from_utf8(b).ok())
             .unwrap_or_else(|| t.to_string())
     };
-    body.split(|c: char| c == '\n' || c == '\r' || c == ' ' || c == '\t')
+    body.trim_start_matches('\u{feff}').lines()
+        .filter(|line| !line.trim_start().starts_with(['#', ';']))
+        .flat_map(str::split_whitespace)
         .map(|s| s.trim())
         .filter(|s| s.contains("://"))
         .map(|s| s.to_string())
@@ -118,8 +120,8 @@ fn parse_vless(raw: &str) -> Result<Profile, String> {
     if uuid.is_empty() {
         return Err("missing uuid".into());
     }
-    let server = url.host_str().ok_or("missing host")?.to_string();
-    let port = url.port().ok_or("missing port")?;
+    let server = url_server(&url)?;
+    let port = url.port().filter(|p| *p > 0).ok_or("не указан или неверный порт")?;
     let q = query_map(&url);
     let name = frag_name(&url, &server);
 
@@ -149,12 +151,15 @@ fn parse_vless(raw: &str) -> Result<Profile, String> {
 // VMess (base64-encoded JSON)
 // ---------------------------------------------------------------------------
 fn parse_vmess(raw: &str) -> Result<Profile, String> {
-    let b64 = raw.trim_start_matches("vmess://").trim();
+    let b64 = raw.split_once("://").ok_or("bad url")?.1.trim();
     let bytes = b64_decode(b64).ok_or("bad base64")?;
     let v: Value = serde_json::from_slice(&bytes).map_err(|e| format!("bad json: {e}"))?;
 
     let server = v["add"].as_str().ok_or("missing add")?.to_string();
-    let port = num_field(&v["port"]).ok_or("missing port")? as u16;
+    let port = num_field(&v["port"])
+        .and_then(|p| u16::try_from(p).ok())
+        .filter(|p| *p > 0)
+        .ok_or("неверный порт")?;
     let uuid = v["id"].as_str().ok_or("missing id")?.to_string();
     let aid = num_field(&v["aid"]).unwrap_or(0);
     let scy = v["scy"].as_str().filter(|s| !s.is_empty()).unwrap_or("auto");
@@ -227,13 +232,18 @@ fn parse_vmess(raw: &str) -> Result<Profile, String> {
 // Shadowsocks
 // ---------------------------------------------------------------------------
 fn parse_ss(raw: &str) -> Result<Profile, String> {
-    let body = raw.trim_start_matches("ss://");
+    let body = raw.split_once("://").ok_or("bad url")?.1;
     let (main, frag) = match body.split_once('#') {
         Some((m, f)) => (m, pct(f)),
         None => (body, String::new()),
     };
-    // strip any query (plugin params) — not supported yet
-    let main = main.split('?').next().unwrap_or(main);
+    // Reject unsupported plugins instead of silently importing a broken profile.
+    if let Some((_, query)) = main.split_once('?') {
+        if url::form_urlencoded::parse(query.as_bytes()).any(|(key, value)| key == "plugin" && !value.is_empty()) {
+            return Err("плагины Shadowsocks не поддерживаются".into());
+        }
+    }
+    let main = main.split('?').next().unwrap_or(main).trim_end_matches('/');
 
     let (method, password, server, port) = if let Some((userinfo, hostport)) = main.rsplit_once('@')
     {
@@ -275,8 +285,8 @@ fn parse_trojan(raw: &str) -> Result<Profile, String> {
     if password.is_empty() {
         return Err("missing password".into());
     }
-    let server = url.host_str().ok_or("missing host")?.to_string();
-    let port = url.port().ok_or("missing port")?;
+    let server = url_server(&url)?;
+    let port = url.port().filter(|p| *p > 0).ok_or("не указан или неверный порт")?;
     let q = query_map(&url);
     let name = frag_name(&url, &server);
 
@@ -308,9 +318,12 @@ fn parse_hysteria2(raw: &str) -> Result<Profile, String> {
     if password.is_empty() {
         return Err("missing password".into());
     }
-    let server = url.host_str().ok_or("missing host")?.to_string();
+    let server = url_server(&url)?;
     // Hysteria2's default port is 443.
     let port = url.port().unwrap_or(443);
+    if port == 0 {
+        return Err("неверный порт".into());
+    }
     let q = query_map(&url);
     let name = frag_name(&url, &server);
 
@@ -348,14 +361,24 @@ fn parse_hysteria2(raw: &str) -> Result<Profile, String> {
 // ---------------------------------------------------------------------------
 // Shared helpers
 // ---------------------------------------------------------------------------
+fn url_server(url: &Url) -> Result<String, String> {
+    let host = url.host_str().filter(|h| !h.is_empty()).ok_or("missing host")?;
+    Ok(host.trim_start_matches('[').trim_end_matches(']').to_string())
+}
+
 fn build_tls(q: &HashMap<String, String>, server: &str, reality: bool) -> Value {
     let sni = q
         .get("sni")
-        .or_else(|| q.get("peer"))
         .filter(|s| !s.is_empty())
+        .or_else(|| q.get("peer").filter(|s| !s.is_empty()))
         .cloned()
         .unwrap_or_else(|| server.to_string());
     let mut tls = json!({ "enabled": true, "server_name": sni });
+    if ["allowInsecure", "insecure"].iter().any(|key| {
+        matches!(q.get(*key).map(String::as_str), Some("1") | Some("true"))
+    }) {
+        tls["insecure"] = json!(true);
+    }
     if let Some(alpn) = q.get("alpn").filter(|s| !s.is_empty()) {
         tls["alpn"] = json!(alpn.split(',').map(|s| s.trim()).collect::<Vec<_>>());
     }
@@ -449,9 +472,7 @@ fn frag_name(url: &Url, fallback: &str) -> String {
 }
 
 fn split_hostport(hp: &str) -> Result<(String, u16), String> {
-    let (h, p) = hp.rsplit_once(':').ok_or("missing port")?;
-    let port: u16 = p.trim().parse().map_err(|_| "bad port")?;
-    Ok((h.to_string(), port))
+    crate::wireguard::parse_endpoint(hp)
 }
 
 /// Percent-decode a string (lossy).
@@ -469,19 +490,104 @@ fn num_field(v: &Value) -> Option<u64> {
 
 /// Try several base64 alphabets/paddings.
 fn b64_decode(s: &str) -> Option<Vec<u8>> {
-    let s = s.trim();
+    let s: String = s.chars().filter(|c| !c.is_whitespace()).collect();
     use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD, URL_SAFE, URL_SAFE_NO_PAD};
     STANDARD
-        .decode(s)
+        .decode(&s)
         .ok()
-        .or_else(|| URL_SAFE.decode(s).ok())
-        .or_else(|| STANDARD_NO_PAD.decode(s).ok())
-        .or_else(|| URL_SAFE_NO_PAD.decode(s).ok())
+        .or_else(|| URL_SAFE.decode(&s).ok())
+        .or_else(|| STANDARD_NO_PAD.decode(&s).ok())
+        .or_else(|| URL_SAFE_NO_PAD.decode(&s).ok())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn malformed_unicode_link_does_not_panic() {
+        let (profiles, errors) = parse_many(&format!("broken://{}", "я".repeat(40)));
+        assert!(profiles.is_empty());
+        assert_eq!(errors.len(), 1);
+    }
+
+    #[test]
+    fn vmess_scheme_case_and_port_bounds() {
+        for port in [json!(0), json!(65536), json!("999999"), json!("bad"), Value::Null] {
+            let body = json!({"add":"example.invalid", "id":"u", "port":port});
+            let link = format!("vmess://{}", base64::engine::general_purpose::STANDARD.encode(body.to_string()));
+            assert!(parse_link(&link).is_err(), "port {port}");
+        }
+        for aid in [json!(0), json!("16")] {
+            let body = json!({"add":"example.invalid", "id":"u", "port":"65535", "aid":aid, "net":"", "tls":""});
+            let link = format!("VMESS://{}", base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(body.to_string()));
+            let profile = parse_link(&link).unwrap();
+            assert_eq!(profile.port, 65535);
+            assert!(profile.outbound.get("transport").is_none());
+            assert_eq!(profile.outbound["alter_id"], num_field(&aid).unwrap());
+        }
+    }
+
+    #[test]
+    fn url_protocols_validate_ports_and_normalize_ipv6() {
+        for scheme in ["vless", "trojan", "hy2"] {
+            let p = parse_link(&format!("{scheme}://u@[2001:db8::1]:65535#%F0%9F%87%A7%F0%9F%87%BE+A%20B")).unwrap();
+            assert_eq!(p.server, "2001:db8::1");
+            assert_eq!(p.outbound["server"], "2001:db8::1");
+            assert_eq!(p.name, "🇧🇾+A B");
+            for port in ["0", "65536", "bad"] {
+                assert!(parse_link(&format!("{scheme}://u@example.invalid:{port}")).is_err());
+            }
+        }
+        assert!(parse_link("vless://u@example.invalid").is_err());
+    }
+
+    #[test]
+    fn sip002_trailing_slash_ipv6_and_password_colons() {
+        for engine in [base64::engine::general_purpose::STANDARD, base64::engine::general_purpose::URL_SAFE_NO_PAD] {
+            let creds = engine.encode("aes-256-gcm:pass:word");
+            let p = parse_link(&format!("SS://{creds}@[2001:db8::1]:8388/#name")).unwrap();
+            assert_eq!(p.server, "2001:db8::1");
+            assert_eq!(p.outbound["password"], "pass:word");
+            let legacy = engine.encode("aes-256-gcm:pass:word@example.invalid:8388");
+            assert_eq!(parse_link(&format!("ss://{legacy}")).unwrap().outbound["password"], "pass:word");
+        }
+    }
+
+    #[test]
+    fn tls_aliases_and_transport_fields() {
+        for flag in ["allowInsecure", "insecure"] {
+            let p = parse_link(&format!("VLESS://u@example.invalid:443?security=tls&sni=&peer=peer.invalid&{flag}=1&type=grpc&serviceName=svc")).unwrap();
+            assert_eq!(p.outbound["tls"]["server_name"], "peer.invalid");
+            assert_eq!(p.outbound["tls"]["insecure"], true);
+            assert_eq!(p.outbound["tls"]["alpn"], json!(["h2"]));
+            assert_eq!(p.outbound["transport"]["service_name"], "svc");
+        }
+        for transport in ["ws", "httpupgrade"] {
+            let p = parse_link(&format!("trojan://u@example.invalid:443?type={transport}&path=%2Fx%3Fa%3D1&host=cdn.invalid&alpn=h2,http%2F1.1")).unwrap();
+            assert_eq!(p.outbound["transport"]["path"], "/x?a=1");
+            assert_eq!(p.outbound["tls"]["alpn"], json!(["h2", "http/1.1"]));
+        }
+    }
+
+    #[test]
+    fn subscription_bom_comments_wrapped_base64_and_partial_errors() {
+        let body = "\u{feff}# trojan://ignored@h.invalid:443\r\n; vless://ignored@h.invalid:443\r\nvless://u@h.invalid:443\r\nbad://broken trojan://pw@h.invalid:443";
+        for input in [body.to_string(), base64::engine::general_purpose::STANDARD.encode(body)] {
+            let input = if input.contains("://") { input } else {
+                input.as_bytes().chunks(20).map(|c| std::str::from_utf8(c).unwrap()).collect::<Vec<_>>().join("\r\n")
+            };
+            let (profiles, errors) = parse_many(&input);
+            assert_eq!(profiles.len(), 2);
+            assert_eq!(errors.len(), 1);
+        }
+    }
+
+    #[test]
+    fn unsupported_ss_plugin_must_be_reported() {
+        assert!(parse_link("ss://aes-256-gcm:pw@example.invalid:8388/?plugin=v2ray-plugin%3Btls").is_err());
+        assert!(parse_link("ss://aes-256-gcm:pw@example.invalid:8388/?plugin=").is_ok());
+    }
 
     #[test]
     fn parse_shadowsocks_sip002() {

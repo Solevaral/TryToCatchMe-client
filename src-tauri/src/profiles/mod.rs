@@ -334,3 +334,37 @@ fn now() -> u64 {
         .map(|d| d.as_secs())
         .unwrap_or(0)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn store() -> ProfileStore {
+        let profiles = links::parse_many("vless://u@a.invalid:443#a\ntrojan://p@b.invalid:443#b").0;
+        ProfileStore { inner: Mutex::new(Persisted { active: Some(profiles[0].id.clone()), profiles, subscriptions: vec![] }) }
+    }
+
+    #[test]
+    fn pinned_outbound_keeps_source_and_active_selection_intact() {
+        let s = store();
+        let profiles = s.list();
+        let pinned = s.outbound_of(&profiles[1].id, "via-test").unwrap();
+        assert_eq!(pinned["tag"], "via-test");
+        assert!(profiles[1].outbound.get("tag").is_none());
+        assert!(s.list()[1].outbound.get("tag").is_none());
+        assert_eq!(s.active_outbound().unwrap()["server"], "a.invalid");
+        assert_eq!(s.active_id().as_deref(), Some(profiles[0].id.as_str()));
+        assert!(s.outbound_of("gone", "via-gone").is_none());
+    }
+
+    #[test]
+    fn failover_wraps_and_requires_an_alternative() {
+        let s = store();
+        let profiles = s.list();
+        assert_eq!(s.next_active_id(), Some(profiles[1].id.clone()));
+        s.inner.lock().active = Some(profiles[1].id.clone());
+        assert_eq!(s.next_active_id(), Some(profiles[0].id.clone()));
+        s.inner.lock().profiles.pop();
+        assert!(s.next_active_id().is_none());
+    }
+}

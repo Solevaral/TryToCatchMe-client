@@ -49,7 +49,11 @@ pub fn parse(json: &str) -> Result<Vec<Service>, String> {
     if list.len() < MIN_SERVICES {
         return Err(format!("в списке только {} сервисов", list.len()));
     }
+    let mut ids = std::collections::HashSet::new();
     for s in &list {
+        if !ids.insert(&s.id) {
+            return Err(format!("повторяющийся идентификатор сервиса «{}»", s.id));
+        }
         let valid_id = !s.id.is_empty()
             && s.id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
         if !valid_id || s.name.trim().is_empty() {
@@ -186,6 +190,12 @@ pub fn schedule(app: &AppHandle, vpn_port: Option<u16>) {
 #[cfg(test)]
 mod tests {
     use super::parse;
+
+    #[test]
+    fn duplicate_service_ids_are_rejected() {
+        let service = serde_json::json!({"id":"duplicate", "name":"Service", "icon":"", "domains":["example.invalid"]});
+        assert!(parse(&serde_json::to_string(&vec![service; 10]).unwrap()).is_err());
+    }
 
     #[test]
     fn bundled_library_is_valid() {

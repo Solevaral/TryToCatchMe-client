@@ -517,7 +517,7 @@ function LibraryModal({
   catalog: Service[];
   onAdd: (s: Service) => void;
   onRemove: (id: string) => void;
-  onSynced: (changed: boolean) => void;
+  onSynced: (changed: boolean) => Promise<void>;
   onClose: () => void;
 }) {
   const [lib, setLib] = useState<Service[]>([]);
@@ -532,7 +532,7 @@ function LibraryModal({
       const r = await servicesLibraryRefresh();
       setRefreshMsg({ ok: r.ok, text: r.message });
       setLib(await servicesLibrary());
-      onSynced(r.changed);
+      await onSynced(r.changed);
     } catch (e) {
       setRefreshMsg({ ok: false, text: String(e) });
     } finally {
@@ -665,6 +665,7 @@ function ServiceEditor({
   function save() {
     const id = initial.id || name.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || `svc-${Date.now()}`;
     onSave({
+      ...initial,
       id,
       name: name.trim() || id,
       icon: icon.trim() || "🔧",

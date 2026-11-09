@@ -11,6 +11,28 @@ fn default_true() -> bool {
     true
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn old_settings_get_all_current_defaults() {
+        let old: Settings = serde_json::from_str(r#"{"unknown_future_field":true}"#).unwrap();
+        assert_eq!(serde_json::to_value(old).unwrap(), serde_json::to_value(Settings::default()).unwrap());
+    }
+
+    #[test]
+    fn experimental_toggles_require_both_flags() {
+        for experimental in [false, true] {
+            for enabled in [false, true] {
+                let s = Settings { experimental, auto_switch: enabled, udp_independent_nat: enabled, ..Default::default() };
+                assert_eq!(s.auto_switch_on(), experimental && enabled);
+                assert_eq!(s.udp_independent_nat_on(), experimental && enabled);
+            }
+        }
+    }
+}
+
 fn default_proxy_port() -> u16 {
     ttcm_core::config::MIXED_PORT
 }

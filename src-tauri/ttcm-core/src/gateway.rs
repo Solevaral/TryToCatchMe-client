@@ -101,7 +101,10 @@ pub fn parse_linux_routes(text: &str) -> Vec<RouteCandidate> {
             let after = |key: &str| t.iter().position(|x| *x == key).and_then(|i| t.get(i + 1)).map(|s| s.to_string());
             Some(RouteCandidate {
                 gateway: after("via")?,
-                metric: after("metric").and_then(|m| m.parse().ok()).unwrap_or(0),
+                metric: match after("metric") {
+                    Some(m) => m.parse().unwrap_or(u32::MAX),
+                    None => 0,
+                },
                 adapter: after("dev").unwrap_or_default(),
                 description: String::new(),
             })
@@ -112,6 +115,13 @@ pub fn parse_linux_routes(text: &str) -> Vec<RouteCandidate> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn overflowing_metric_cannot_win_over_valid_route() {
+        let routes = parse_linux_routes("default via 192.168.1.1 dev eth0 metric 4294967296\ndefault via 192.168.2.1 dev eth1 metric 50\ndefault via fe80::1 dev eth2 metric 1\ngarbage");
+        assert_eq!(pick_gateway(&routes).unwrap().gateway, "192.168.2.1");
+        assert_eq!(physical_gateway(&routes).unwrap().gateway, "192.168.2.1");
+    }
 
     #[test]
     fn physical_gateway_is_the_real_card() {

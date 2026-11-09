@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Emitter, Manager};
 
 fn default_true() -> bool {
     true
@@ -19,6 +19,15 @@ mod tests {
     fn old_settings_get_all_current_defaults() {
         let old: Settings = serde_json::from_str(r#"{"unknown_future_field":true}"#).unwrap();
         assert_eq!(serde_json::to_value(old).unwrap(), serde_json::to_value(Settings::default()).unwrap());
+    }
+
+    #[test]
+    fn invalid_saved_port_falls_back_without_resetting_other_settings() {
+        let mut s = Settings { proxy_port: 9090, block_quic: true, ..Default::default() };
+        assert!(s.repair_port().is_some());
+        assert_eq!(s.proxy_port, default_proxy_port());
+        assert!(s.block_quic);
+        assert!(s.repair_port().is_none());
     }
 
     #[test]
@@ -151,6 +160,12 @@ pub struct SettingsStore {
 }
 
 impl Settings {
+    fn repair_port(&mut self) -> Option<String> {
+        let error = ttcm_core::config::validate_ports(self.proxy_port, 9090, cfg!(target_os = "linux")).err()?;
+        self.proxy_port = default_proxy_port();
+        Some(format!("{error}. Используется порт {}", self.proxy_port))
+    }
+
     /// Auto-switch is an experimental feature: off unless both toggles are on.
     pub fn auto_switch_on(&self) -> bool {
         self.experimental && self.auto_switch
@@ -174,7 +189,11 @@ impl SettingsStore {
     pub fn load(&self, app: &AppHandle) {
         if let Ok(path) = Self::file(app) {
             if let Ok(bytes) = fs::read(&path) {
-                if let Ok(s) = serde_json::from_slice::<Settings>(&bytes) {
+                if let Ok(mut s) = serde_json::from_slice::<Settings>(&bytes) {
+                    if let Some(message) = s.repair_port() {
+                        eprintln!("{message}");
+                        let _ = app.emit("app://log", message);
+                    }
                     *self.inner.lock() = s;
                 }
             }
@@ -185,15 +204,12 @@ impl SettingsStore {
         self.inner.lock().clone()
     }
 
-    pub fn set(&self, app: &AppHandle, s: Settings) {
-        *self.inner.lock() = s;
-        if let Ok(path) = Self::file(app) {
-            if let Some(parent) = path.parent() {
-                let _ = fs::create_dir_all(parent);
-            }
-            if let Ok(json) = serde_json::to_string_pretty(&*self.inner.lock()) {
-                let _ = fs::write(&path, json);
-            }
-        }
+    pub fn set(&self, app: &AppHandle, s: Settings) -> Result<(), String> {
+        ttcm_core::config::validate_ports(s.proxy_port, 9090, cfg!(target_os = "linux"))?;
+        let mut g = self.inner.lock();
+        crate::storage::save(&Self::file(app)?, &s)?;
+        *g = s;
+        let _ = app.emit("settings://changed", ());
+        Ok(())
     }
 }

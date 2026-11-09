@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef } from "react";
 import {
   routingGet,
   routingSetConfig,
@@ -10,7 +10,7 @@ import {
   coreRestart,
   geoRefresh,
   settingsGet,
-  settingsSet,
+  settingsPatch,
   isAdmin,
   relaunchAdmin,
   profilesList,
@@ -20,6 +20,7 @@ import {
   type RuleAction,
   type Settings,
 } from "../api/backend";
+import { useFreshData } from "../hooks/useFreshData";
 import { useAppStore } from "../store/appStore";
 
 const ACTIONS: RuleAction[] = ["proxy", "direct", "block"];
@@ -41,6 +42,8 @@ export default function RoutingPage() {
   const [geoFrom, setGeoFrom] = useState<"ru" | "antifilter">("ru");
   const [settings, setSettings] = useState<Settings | null>(null);
   const [profiles, setProfiles] = useState<Profile[]>([]);
+  const saving = useRef(false);
+  const [savingUi, setSavingUi] = useState(false);
   const [syncing, setSyncing] = useState(false);
   const [syncResult, setSyncResult] = useState<{ ok: boolean; message: string } | null>(null);
 
@@ -50,7 +53,7 @@ export default function RoutingPage() {
     setCatalog(snap.catalog);
   }
   useEffect(() => {
-    reload().catch(console.error);
+    reload().catch((e) => useAppStore.getState().setLastError(String(e)));
     settingsGet().then(setSettings).catch(() => setSettings(null));
     profilesList().then(setProfiles).catch(() => setProfiles([]));
   }, []);
@@ -64,30 +67,40 @@ export default function RoutingPage() {
           "Режим TUN перехватывает ВЕСЬ трафик системы (включая приложения, которые игнорируют прокси — например Claude), но требует прав администратора.\n\nПерезапустить приложение от имени администратора?"
         );
         if (ok) {
-          await settingsSet({ ...settings, capture_tun: true }); // remember the choice
+          await settingsPatch({ capture_tun: true }); // remember the choice
           await relaunchAdmin(); // app exits and relaunches elevated
         }
         return;
       }
     }
-    const next = { ...settings, capture_tun: tun };
-    setSettings(next);
-    await settingsSet(next);
+    setSettings(await settingsPatch({ capture_tun: tun }));
     if (status === "connected") await reloadProfile();
   }
+
+  useFreshData(async () => {
+    if (saving.current) return;
+    await reload(); setSettings(await settingsGet()); setProfiles(await profilesList());
+  }, ["routing://changed", "settings://changed", "profiles://changed"]);
+  useEffect(() => {
+    const escape = (e: KeyboardEvent) => { if (e.key === "Escape") { setEditing(null); setShowLibrary(false); } };
+    window.addEventListener("keydown", escape);
+    return () => window.removeEventListener("keydown", escape);
+  }, []);
 
   // TUN options: saved and applied to the running tunnel right away.
   async function patchTun(p: Partial<Settings>) {
     if (!settings) return;
-    const next = { ...settings, ...p };
-    setSettings(next);
-    await settingsSet(next);
+    setSettings(await settingsPatch(p));
     if (status === "connected") await reloadProfile();
   }
 
   async function persist(next: RoutingConfig) {
-    setConfig(next);
-    await routingSetConfig(next);
+    if (saving.current) return;
+    saving.current = true;
+    setSavingUi(true);
+    try { await routingSetConfig(next); setConfig(next); }
+    catch (e) { useAppStore.getState().setLastError(String(e)); await reload(); }
+    finally { saving.current = false; setSavingUi(false); }
   }
 
   // Apply routing/service changes to the running tunnel without leaving the page.
@@ -101,7 +114,8 @@ export default function RoutingPage() {
     try {
       await coreRestart();
       setReloadState("ok");
-    } catch {
+    } catch (e) {
+      useAppStore.getState().setLastError(String(e));
       setReloadState("");
     }
     setTimeout(() => setReloadState(""), 1800);
@@ -173,6 +187,7 @@ export default function RoutingPage() {
     await reload();
   }
   async function removeFromCatalog(id: string) {
+    if (!window.confirm("Удалить сервис из каталога?")) return;
     await serviceRemove(id);
     await reload();
   }
@@ -205,7 +220,7 @@ export default function RoutingPage() {
       : "↻ Перезагрузить профиль";
 
   return (
-    <div>
+    <fieldset disabled={savingUi} style={{ border: 0, padding: 0, margin: 0, minWidth: 0 }}>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
         <h1 className="page-title">Маршрутизация</h1>
         <button
@@ -229,6 +244,7 @@ export default function RoutingPage() {
             <button
               key={m.v}
               className={`btn ${config.mode === m.v ? "primary" : ""}`}
+              disabled={savingUi}
               onClick={() => setMode(m.v)}
             >
               {m.l}
@@ -465,7 +481,7 @@ export default function RoutingPage() {
           initial={editing}
           onCancel={() => setEditing(null)}
           onSave={saveService}
-          onDelete={editing.id ? async () => { await serviceRemove(editing.id); setEditing(null); await reload(); } : undefined}
+          onDelete={editing.id ? async () => { if (!window.confirm("Удалить сервис?")) return; await serviceRemove(editing.id); setEditing(null); await reload(); } : undefined}
         />
       )}
 
@@ -478,7 +494,7 @@ export default function RoutingPage() {
           onClose={() => setShowLibrary(false)}
         />
       )}
-    </div>
+    </fieldset>
   );
 }
 

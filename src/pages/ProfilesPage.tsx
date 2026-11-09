@@ -1,5 +1,6 @@
-import { useEffect, useState, useCallback } from "react";
-import { readText } from "@tauri-apps/plugin-clipboard-manager";
+import { useState, useCallback, useRef } from "react";
+import { readText, writeText } from "@tauri-apps/plugin-clipboard-manager";
+import { useFreshData } from "../hooks/useFreshData";
 import { useLogStore } from "../store/logStore";
 import { useConnection } from "../hooks/useConnection";
 import {
@@ -26,6 +27,11 @@ const PROTO_ICON: Record<string, string> = {
   hysteria2: "⚡",
   wireguard: "🔺",
 };
+
+// Keep the latest measurements across page switches, keyed by the measured outbound.
+let pingCache: Record<string, PingResult> = {};
+let pingFingerprints: Record<string, string> = {};
+let pingTimestamp: number | null = null;
 
 /** "tcp · reality · vision" — what the profile actually uses, at a glance. */
 function transportLabel(p: Profile): string {
@@ -58,17 +64,30 @@ export default function ProfilesPage() {
   const { status, toggle, restart, connected, busy } = useConnection();
   const [profiles, setProfiles] = useState<Profile[]>([]);
   const [subscriptions, setSubscriptions] = useState<Subscription[]>([]);
+  const selecting = useRef(false);
   const [updating, setUpdating] = useState<string | null>(null);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [notice, setNotice] = useState<string>("");
-  const [pings, setPings] = useState<Record<string, PingResult>>({});
+  const [pings, setPings] = useState<Record<string, PingResult>>(pingCache);
   const [pinging, setPinging] = useState(false);
+  const [search, setSearch] = useState("");
+  const [sortPing, setSortPing] = useState(false);
+  const [pingAt, setPingAt] = useState<number | null>(pingTimestamp);
 
   async function pingAll() {
     setPinging(true);
     setNotice("");
     try {
-      setPings(await profilesPingAll());
+      const measured = Object.fromEntries(profiles.map((p) => [p.id, JSON.stringify(p.outbound)]));
+      const results = await profilesPingAll();
+      const current = await profilesList();
+      pingCache = Object.fromEntries(current
+        .filter((p) => measured[p.id] === JSON.stringify(p.outbound) && results[p.id])
+        .map((p) => [p.id, results[p.id]]));
+      pingFingerprints = measured;
+      pingTimestamp = Date.now();
+      setPings(pingCache);
+      setPingAt(pingTimestamp);
     } catch (e) {
       setNotice(String(e));
     } finally {
@@ -82,6 +101,10 @@ export default function ProfilesPage() {
       profilesActive(),
       subscriptionsList(),
     ]);
+    pingCache = Object.fromEntries(list
+      .filter((p) => pingFingerprints[p.id] === JSON.stringify(p.outbound) && pingCache[p.id])
+      .map((p) => [p.id, pingCache[p.id]]));
+    setPings(pingCache);
     setProfiles(list);
     setActiveId(active);
     setSubscriptions(subs);
@@ -94,6 +117,7 @@ export default function ProfilesPage() {
     res.added.forEach((p) => log("app", `Импортирован профиль «${p.name}» (${transportLabel(p)})`));
     res.errors.forEach((err) => log("warning", `Ссылка не импортирована — ${err}`));
     const parts: string[] = [];
+    if (res.skipped_duplicates) parts.push(`Пропущено дубликатов: ${res.skipped_duplicates}`);
     if (res.added.length) parts.push(`Добавлено: ${res.added.length}`);
     if (res.errors.length)
       parts.push(`Не импортировано: ${res.errors.length} — первая причина: ${res.errors[0]} (все причины — во вкладке «Логи»)`);
@@ -102,9 +126,7 @@ export default function ProfilesPage() {
     if (res.active_changed && connected) await restart();
   }
 
-  useEffect(() => {
-    refresh().catch((e) => setNotice(String(e)));
-  }, [refresh]);
+  useFreshData(async () => { await refresh().catch((e) => setNotice(String(e))); }, ["profiles://changed"]);
 
   async function importText(text: string) {
     if (!text || !text.trim()) {
@@ -160,7 +182,8 @@ export default function ProfilesPage() {
   }
 
   async function selectActive(id: string) {
-    if (id === activeId || busy) return;
+    if (id === activeId || busy || selecting.current) return;
+    selecting.current = true;
     try {
       await profilesSetActive(id);
       setActiveId(id);
@@ -168,10 +191,11 @@ export default function ProfilesPage() {
       if (connected) await restart();
     } catch (e) {
       setNotice(String(e));
-    }
+    } finally { selecting.current = false; }
   }
 
   async function remove(id: string) {
+    if (!window.confirm("Удалить профиль?")) return;
     try {
       await profilesRemove(id);
       await refresh();
@@ -182,6 +206,12 @@ export default function ProfilesPage() {
   }
 
   const active = profiles.find((p) => p.id === activeId) || null;
+  const filtered = profiles.filter((p) => `${p.name} ${p.protocol} ${p.server}`.toLowerCase().includes(search.toLowerCase()));
+  const pingMs = (p: Profile) => {
+    const result = pings[p.id];
+    return result && result.status !== "fail" ? result.ms : Number.MAX_SAFE_INTEGER;
+  };
+  if (sortPing) filtered.sort((a, b) => pingMs(a) - pingMs(b));
 
   return (
     <div>
@@ -197,7 +227,7 @@ export default function ProfilesPage() {
           }}
         >
           <div>
-            <div style={{ fontWeight: 600, marginBottom: 4 }}>Активное подключение</div>
+            <div style={{ fontWeight: 600, marginBottom: 4 }}>Выбранный профиль</div>
             <div className="muted">
               {active
                 ? `${PROTO_ICON[active.protocol] ?? "•"} ${active.name} — ${active.server}:${active.port} (${transportLabel(active)})`
@@ -235,7 +265,7 @@ export default function ProfilesPage() {
 
       {notice && (
         <div className="muted" style={{ marginBottom: 12, fontSize: 13 }}>
-          {notice}
+          {notice} <button className="btn" onClick={() => setNotice("")} aria-label="Закрыть сообщение">✕</button>
         </div>
       )}
 
@@ -273,18 +303,22 @@ export default function ProfilesPage() {
         </div>
       )}
 
+      {profiles.length > 8 && <input placeholder="Поиск профиля…" value={search} onChange={(e) => setSearch(e.target.value)} />}
+      {profiles.length > 1 && <button className="btn" onClick={() => setSortPing((v) => !v)}>{sortPing ? "Исходный порядок" : "По последнему пингу"}</button>}
+      {pingAt && <div className="muted">Последний пинг · {new Date(pingAt).toLocaleTimeString()}{pinging ? " · обновляю…" : ""}</div>}
       <div className="card" style={{ padding: profiles.length ? 6 : 18 }}>
         {profiles.length === 0 ? (
           <div className="placeholder">
             Список профилей пуст. Скопируйте ссылку подключения или подписки и нажмите «Вставить из буфера».
           </div>
         ) : (
-          profiles.map((p) => {
+          filtered.map((p) => {
             const result = pings[p.id];
             return (
               <div
                 key={p.id}
                 onClick={() => selectActive(p.id)}
+                onDoubleClick={() => selectActive(p.id)}
                 style={{
                   display: "flex",
                   alignItems: "center",
@@ -320,7 +354,7 @@ export default function ProfilesPage() {
                     : result.status === "partial" ? result.note
                     : result.status === "fail" ? result.reason : undefined}
                 >
-                  {pinging
+                  {!result && pinging
                     ? "…"
                     : result?.status === "ok"
                     ? `${result.ms} ms`
@@ -330,6 +364,7 @@ export default function ProfilesPage() {
                     ? "нет связи"
                     : ""}
                 </span>
+                {p.link && <button className="btn" onClick={(e) => { e.stopPropagation(); writeText(p.link!).catch((err) => setNotice(String(err))); }}>Копировать ссылку</button>}
                 <button
                   className="btn"
                   style={{ padding: "4px 10px" }}

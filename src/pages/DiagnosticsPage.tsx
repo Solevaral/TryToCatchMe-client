@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { diagRun, type DiagReport, type DiagStep } from "../api/backend";
+import { writeText } from "@tauri-apps/plugin-clipboard-manager";
+import { useAppStore } from "../store/appStore";
 
 const STATUS_DOT: Record<string, string> = {
   ok: "dot ok",
@@ -12,6 +14,11 @@ const STATUS_TEXT: Record<string, string> = {
   warn: "внимание",
   fail: "ошибка",
   skip: "пропущено",
+};
+
+const STEP_NAMES: Record<string, string> = {
+  local: "Локальная сеть", isp: "Прямой интернет", server: "VPN-сервер", tunnel: "Запрос через VPN",
+  svc: "Сервисы", "exit-ip": "IP выхода", "google-country": "Страна Google", claude: "Claude API", openai: "OpenAI API",
 };
 
 const STORE_KEY = "ttcm.diag.targets";
@@ -30,6 +37,8 @@ function loadTargets(): string[] {
 }
 
 export default function DiagnosticsPage() {
+  const requested = useAppStore((s) => s.diagnosticsRequested);
+  const [checkedAt, setCheckedAt] = useState<number | null>(null);
   const [targets, setTargets] = useState<string[]>(loadTargets);
   const [draft, setDraft] = useState("");
   const [report, setReport] = useState<DiagReport | null>(null);
@@ -51,6 +60,7 @@ export default function DiagnosticsPage() {
     setDraft("");
   }
   function removeTarget(t: string) {
+    if (!window.confirm("Удалить цель диагностики?")) return;
     setTargets(targets.filter((x) => x !== t));
   }
 
@@ -62,8 +72,11 @@ export default function DiagnosticsPage() {
     try {
       const r = await diagRun(targets);
       setReport(r);
+      setCheckedAt(Date.now());
     } catch (e) {
-      setReport({ steps: [], verdict: String(e) });
+      useAppStore.getState().setLastError(String(e));
+      setReport(null);
+      setCheckedAt(null);
     } finally {
       setRunning(false);
       runningRef.current = false;
@@ -72,11 +85,12 @@ export default function DiagnosticsPage() {
 
   // Auto-run when triggered from the tray "Диагностика" action.
   useEffect(() => {
+    if (requested) { useAppStore.getState().consumeDiagnostics(); void run(); }
     const h = () => run();
     window.addEventListener("ttcm:run-diagnostics", h);
     return () => window.removeEventListener("ttcm:run-diagnostics", h);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [targets]);
+  }, [targets, requested]);
 
   const verdictColor =
     report && /в порядке/i.test(report.verdict) ? "var(--ok)" : report ? "var(--warn)" : "var(--text-1)";
@@ -110,6 +124,15 @@ export default function DiagnosticsPage() {
         </div>
       </div>
 
+      {report && <div className="muted">Снимок проверки · {checkedAt ? new Date(checkedAt).toLocaleString() : "время неизвестно"}. После смены подключения выполните проверку снова.
+        <button className="btn" onClick={async () => {
+          try {
+            // Details and labels can contain user input. Export only fixed identifiers and outcomes.
+            const summary = report.steps.map((s) => `${STEP_NAMES[s.id] ?? (s.id.startsWith("target") ? "Целевой адрес" : "Дополнительная проверка")} — ${STATUS_TEXT[s.status] ?? s.status}${s.ms == null ? "" : ` · ${s.ms} мс`}`).join("\n");
+            await writeText(`Диагностика TTCM · ${checkedAt ? new Date(checkedAt).toLocaleString() : ""}\n${summary}`);
+          } catch (e) { useAppStore.getState().setLastError(String(e)); }
+        }}>Скопировать отчёт</button>
+      </div>}
       {report && (
         <div className="card" style={{ marginBottom: 16, borderColor: verdictColor }}>
           <div style={{ fontWeight: 650, color: verdictColor }}>Вердикт: {report.verdict}</div>

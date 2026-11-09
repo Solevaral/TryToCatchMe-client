@@ -39,6 +39,7 @@ pub struct DiagReport {
 pub struct DiagInput {
     pub server: Option<(String, u16)>,
     pub core_running: bool,
+    pub udp_only: bool,
     pub targets: Vec<String>, // hosts (optionally host:port)
 }
 
@@ -55,7 +56,7 @@ fn step(id: &str, label: &str, status: &str, detail: impl Into<String>, ms: Opti
 /// Run the full diagnostic chain (blocking; call via spawn_blocking).
 pub fn run(input: DiagInput) -> DiagReport {
     let mut steps = Vec::new();
-    let mut verdict = String::from("Всё в порядке");
+    let mut verdict = String::from(if input.core_running { "Всё в порядке" } else { "Проверка прямого доступа завершена. VPN выключен" });
     let mut decided = false;
 
     // 1. Local network / default gateway.
@@ -64,8 +65,8 @@ pub fn run(input: DiagInput) -> DiagReport {
         Some((ip, adapter)) => match icmp_ping(ip) {
             true => steps.push(step("local", "ПК → роутер / шлюз", "ok", format!("шлюз {ip}{adapter} отвечает"), None)),
             false => {
-                steps.push(step("local", "ПК → роутер / шлюз", "fail", format!("шлюз {ip}{adapter} не отвечает"), None));
-                verdict = "Обрыв на звене: локальная сеть / роутер".into();
+                steps.push(step("local", "ПК → роутер / шлюз", "fail", format!("нет ICMP-ответа от шлюза {ip}{adapter}"), None));
+                verdict = "Нет ICMP-ответа от шлюза. Возможна фильтрация ICMP или проблема локальной сети".into();
                 decided = true;
             }
         },
@@ -89,9 +90,10 @@ pub fn run(input: DiagInput) -> DiagReport {
     // 3. VPN server reachability (before the tunnel).
     match &input.server {
         None => steps.push(step("server", "VPN-сервер (до туннеля)", "skip", "профиль не выбран", None)),
+        Some(_) if input.udp_only => steps.push(step("server", "VPN-сервер (до туннеля)", "skip", "Hysteria2 использует UDP. TCP-проба не подтверждает доступность этого протокола", None)),
         Some((host, port)) => {
             let icmp = icmp_ping(host);
-            let tcp = tcp_connect(&format!("{host}:{port}"), 4000);
+            let tcp = tcp_connect(&ttcm_core::target::Target { host: host.clone(), port: Some(*port), scheme: None, path: "/".into() }.socket(), 4000);
             match tcp {
                 Some(ms) => steps.push(step("server", "VPN-сервер (до туннеля)", "ok", format!("{host}:{port} доступен"), Some(ms))),
                 None => {
@@ -137,22 +139,24 @@ pub fn run(input: DiagInput) -> DiagReport {
     // when connected, the target is probed THROUGH the proxy and a failure there
     // drives the verdict (a direct TCP probe alone would bypass the VPN and lie).
     for (i, raw) in input.targets.iter().enumerate() {
-        let host = raw.split(':').next().unwrap_or(raw).trim().to_string();
-        if host.is_empty() {
-            continue;
-        }
-        let hostport = if raw.contains(':') {
-            raw.clone()
-        } else {
-            format!("{host}:443")
+        let target = match ttcm_core::target::parse(raw) {
+            Ok(t) => t,
+            Err(e) => {
+                steps.push(step(&format!("target{i}"), "Цель", "fail", e, None));
+                verdict = "Некорректная цель диагностики".into();
+                decided = true;
+                continue;
+            }
         };
+        let host = &target.host;
+        let hostport = target.socket();
         let direct = tcp_connect(&hostport, 4000);
         let id = format!("target{i}");
         let label = format!("Цель: {host}");
 
         if input.core_running {
-            let via = clash_delay(&format!("https://{host}/"), 5000)
-                .or_else(|| clash_delay(&format!("http://{host}/"), 5000));
+            let via = clash_delay(&target.url("https"), 5000)
+                .or_else(|| if target.scheme.is_none() { clash_delay(&target.url("http"), 5000) } else { None });
             match via {
                 Some(ms) => steps.push(step(
                     &id,
@@ -244,7 +248,7 @@ pub fn clash_delay(test_url: &str, timeout_ms: u64) -> Option<u64> {
 
 /// Same, through a specific outbound tag (e.g. a profile a service is pinned to).
 pub fn clash_delay_via(tag: &str, test_url: &str, timeout_ms: u64) -> Option<u64> {
-    let enc = test_url.replace(':', "%3A").replace('/', "%2F");
+    let enc: String = test_url.bytes().map(|b| format!("%{b:02X}")).collect();
     let path = format!("/proxies/{tag}/delay?timeout={timeout_ms}&url={enc}");
     let body = http_get_localhost(CLASH_CONTROLLER, &path, timeout_ms + 1000)?;
     // Response: {"delay": 123} on success; {"message": "..."} on failure.
@@ -408,7 +412,7 @@ pub async fn service_checks(proxy_port: u16) -> Vec<DiagStep> {
                 format!("{cc} — Gemini покажет «недоступно в вашей стране». Закрепите сервис «Google + Gemini» за профилем, у которого Google видит другую страну (Маршрутизация → Google + Gemini → сервер)."),
                 Some(t.elapsed().as_millis() as u64),
             )),
-            Some(cc) => steps.push(step("google-country", label, "ok", format!("{cc} — Gemini доступен"), Some(t.elapsed().as_millis() as u64))),
+            Some(cc) => steps.push(step("google-country", label, "ok", format!("{cc} — страна определена, доступность Gemini этой проверкой не подтверждается"), Some(t.elapsed().as_millis() as u64))),
             None => steps.push(step("google-country", label, "warn", "не удалось определить", None)),
         },
         Err(e) => steps.push(step("google-country", label, "fail", format!("Google не открывается: {e}"), None)),
@@ -422,12 +426,12 @@ pub async fn service_checks(proxy_port: u16) -> Vec<DiagStep> {
         let t = Instant::now();
         let ms = || Some(t.elapsed().as_millis() as u64);
         match get_via(&routed, url).await {
-            Ok((401, _)) | Ok((200, _)) => steps.push(step(id, label, "ok", "доступен из этой страны", ms())),
+            Ok((401, _)) | Ok((200, _)) => steps.push(step(id, label, "ok", "API ответил успешно или запросил авторизацию", ms())),
             Ok((403, body)) => steps.push(step(
                 id,
                 label,
                 "fail",
-                format!("регион этого IP заблокирован сервисом{}", if body.contains("country") || body.contains("region") { "" } else { " (403)" }),
+                format!("API отказал в доступе{}", if body.contains("country") || body.contains("region") { "" } else { " (HTTP 403, причина может отличаться от региона)" }),
                 ms(),
             )),
             Ok((code, _)) => steps.push(step(id, label, "warn", format!("ответ {code}"), ms())),

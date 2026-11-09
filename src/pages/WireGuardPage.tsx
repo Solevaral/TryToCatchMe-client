@@ -3,7 +3,7 @@ import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import {
   routingGet,
   settingsGet,
-  settingsSet,
+  settingsPatch,
   wgCheck,
   wgExport,
   wgImport,
@@ -24,6 +24,7 @@ import {
 } from "../api/backend";
 import ListEditor, { fieldStyle } from "../components/ListEditor";
 import { errorText } from "../hooks/useConnection";
+import { useFreshData } from "../hooks/useFreshData";
 
 function bytes(n: number): string {
   if (n < 1024) return `${n} Б`;
@@ -69,19 +70,27 @@ export default function WireGuardPage() {
     setVpnServices(routing.config.services.filter((s) => s.action === "proxy").map((s) => s.id));
   }, []);
 
+  useFreshData(async () => { await reload().catch((e) => setMsg({ ok: false, text: errorText(e) })); }, ["wg://changed", "settings://changed", "routing://changed"]);
+
   useEffect(() => {
-    reload().catch((e) => setMsg({ ok: false, text: errorText(e) }));
-  }, [reload]);
+    const escape = (e: KeyboardEvent) => {
+      if (e.key === "Escape") { setEditing(null); setExported(null); setShowPaste(false); }
+    };
+    window.addEventListener("keydown", escape);
+    return () => window.removeEventListener("keydown", escape);
+  }, []);
 
   // Live status while the page is open.
   useEffect(() => {
     let alive = true;
-    const tick = () => wgStatus().then((s) => alive && setStatus(s)).catch(() => {});
+    const tick = () => { if (document.hidden) return; return wgStatus().then((s) => alive && setStatus(s)).catch(() => alive && setStatus(null)); };
     tick();
-    const t = setInterval(tick, 2000);
+    const t = setInterval(tick, 4000);
+    window.addEventListener("focus", tick);
     return () => {
       alive = false;
       clearInterval(t);
+      window.removeEventListener("focus", tick);
     };
   }, []);
 
@@ -89,6 +98,7 @@ export default function WireGuardPage() {
     try {
       await f();
       await reload();
+      setStatus(await wgStatus(true));
       if (ok) setMsg({ ok: true, text: ok });
     } catch (e) {
       setMsg({ ok: false, text: errorText(e) });
@@ -97,8 +107,7 @@ export default function WireGuardPage() {
 
   async function patch(p: Partial<Settings>) {
     if (!settings) return;
-    const next = { ...settings, ...p };
-    await run(() => settingsSet(next), store?.active ? "Сохранено — нажмите «↻ Перезапустить WG» слева, чтобы применить" : "Сохранено — применится при подключении");
+    await run(() => settingsPatch(p), store?.active ? "Сохранено — нажмите «↻ Перезапустить WG» слева, чтобы применить" : "Сохранено — применится при подключении");
   }
 
   async function importText(text: string, name: string) {
@@ -142,7 +151,7 @@ export default function WireGuardPage() {
     return (
       <div>
         <h1 className="page-title">WireGuard</h1>
-        <div className="muted">Загрузка…</div>
+        <div className="muted">{msg?.text ?? "Загрузка…"}</div>
       </div>
     );
   }
@@ -270,7 +279,7 @@ export default function WireGuardPage() {
         </div>
         {msg && (
           <div style={{ fontSize: 12, marginTop: 8, color: msg.ok ? "var(--ok)" : "var(--err)", whiteSpace: "pre-wrap" }}>
-            {msg.text}
+            {msg.text} <button className="btn" onClick={() => setMsg(null)} aria-label="Закрыть сообщение">✕</button>
           </div>
         )}
         <div className="muted" style={{ fontSize: 12, marginTop: 8 }}>

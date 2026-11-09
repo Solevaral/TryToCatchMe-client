@@ -65,10 +65,13 @@ pub fn build(app: &AppHandle) -> tauri::Result<()> {
 
 /// Update the tray icon, tooltip, and toggle label for the given state.
 pub fn set_state(app: &AppHandle, state: &str) {
+    let actual = app.state::<CoreState>().status();
+    let state = if state == "connected" && (actual.health != Some(true) || actual.capture_up != Some(true)) { "degraded" } else { state };
     if let Some(tray) = app.tray_by_id(TRAY_ID) {
         let _ = tray.set_icon(Some(icon_for(state)));
         let tip = match state {
-            "connected" => "TryToCatchMe — подключено",
+            "connected" => "TryToCatchMe — последняя проверка связи успешна",
+            "degraded" => "TryToCatchMe — ядро запущено, связь или перехват не подтверждены",
             "error" => "TryToCatchMe — потеря соединения",
             _ => "TryToCatchMe — готово",
         };
@@ -117,12 +120,12 @@ pub(crate) fn connect(app: &AppHandle) {
 /// the core stops and the OS system proxy is reverted).
 pub(crate) fn disconnect(app: &AppHandle) {
     app.state::<CoreState>().set_vpn(false);
-    set_state(app, "idle");
-    let _ = app.emit("vpn://state", "idle");
+    let _ = app.emit("vpn://state", "connecting");
     let app = app.clone();
     std::thread::spawn(move || {
-        if let Err(e) = crate::core::apply(&app) {
-            let _ = app.emit("app://error", e);
+        match crate::core::apply(&app) {
+            Ok(()) => { set_state(&app, "idle"); let _ = app.emit("vpn://state", "idle"); }
+            Err(e) => { set_state(&app, "error"); let _ = app.emit("vpn://state", "error"); let _ = app.emit("app://error", e); }
         }
     });
 }
@@ -148,7 +151,7 @@ pub(crate) fn show_main(app: &AppHandle) {
 fn icon_for(state: &str) -> tauri::image::Image<'static> {
     let bytes: &[u8] = match state {
         "connected" => include_bytes!("../../icons/tray/connected.png"),
-        "error" => include_bytes!("../../icons/tray/error.png"),
+        "degraded" | "error" => include_bytes!("../../icons/tray/error.png"),
         _ => include_bytes!("../../icons/tray/idle.png"),
     };
     tauri::image::Image::from_bytes(bytes).expect("bundled tray png is valid")

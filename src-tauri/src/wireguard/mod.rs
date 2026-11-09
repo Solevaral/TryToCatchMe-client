@@ -23,6 +23,7 @@ use crate::settings::SettingsStore;
 #[derive(Default)]
 pub struct WgState {
     inner: Mutex<WgStore>,
+    runtime: Mutex<(bool, u16)>,
     /// The tunnel the running core was started with (`None`: no tunnel in the config).
     applied: Mutex<Option<String>>,
     /// Why the chosen tunnel is held off right now (another copy of it is running, or it
@@ -54,20 +55,7 @@ impl WgState {
         }
     }
 
-    fn save(&self, app: &AppHandle) -> Result<(), String> {
-        let path = Self::file(app)?;
-        if let Some(parent) = path.parent() {
-            let _ = fs::create_dir_all(parent);
-        }
-        let json = serde_json::to_string_pretty(&*self.inner.lock()).map_err(|e| e.to_string())?;
-        fs::write(&path, json).map_err(|e| format!("не удалось сохранить wireguard.json: {e}"))?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = fs::set_permissions(&path, fs::Permissions::from_mode(0o600));
-        }
-        Ok(())
-    }
+    pub fn set_runtime(&self, internet: bool, port: u16) { *self.runtime.lock() = (internet, port); }
 
     pub fn get(&self) -> WgStore {
         self.inner.lock().clone()
@@ -134,9 +122,10 @@ impl WgState {
     }
 
     fn with<R>(&self, app: &AppHandle, f: impl FnOnce(&mut WgStore) -> Result<R, String>) -> Result<R, String> {
-        let r = f(&mut self.inner.lock())?;
-        self.save(app)?;
-        Ok(r)
+        let mut g = self.inner.lock();
+        let result = crate::storage::transaction(&mut *g, f, |next| crate::storage::save(&Self::file(app)?, next))?;
+        let _ = tauri::Emitter::emit(app, "wg://changed", ());
+        Ok(result)
     }
 }
 
@@ -318,9 +307,14 @@ pub struct Check {
 /// hosts behind it (see `ttcm_core::wgprobe`) — before, this mode wasn't checked at all
 /// and the UI said "running" even with no handshake.
 pub fn check_tunnel(app: &AppHandle) -> Check {
+    let core = app.state::<CoreState>();
+    let _operation = core.op.lock();
     let state = app.state::<WgState>();
     let internet = internet_through_tunnel(app);
-    let none = |text: &str| Check { ok: None, text: text.to_string(), internet };
+    let none = |text: &str| {
+        *state.health.lock() = None;
+        Check { ok: None, text: text.to_string(), internet }
+    };
     if !app.state::<CoreState>().status().running {
         return none("туннель не подключён");
     }
@@ -337,7 +331,7 @@ pub fn check_tunnel(app: &AppHandle) -> Check {
         return Check { ok: Some(ok), text, internet };
     }
     let targets = wgprobe::probe_targets(&t);
-    let port = app.state::<SettingsStore>().get().proxy_port;
+    let port = state.runtime.lock().1;
     let proxy = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
     let first = *state.last_target.lock();
     let started = Instant::now();
@@ -371,8 +365,7 @@ fn is_checkable(app: &AppHandle, t: &WgTunnel) -> bool {
 /// Internet traffic goes through the running tunnel (the modes) — so a request through
 /// it to a test URL proves it works.
 pub fn internet_through_tunnel(app: &AppHandle) -> bool {
-    let s = app.state::<SettingsStore>().get();
-    s.wg_direct_via_tunnel || (s.wg_vpn_over_tunnel && app.state::<CoreState>().vpn_connected())
+    app.state::<WgState>().runtime.lock().0
 }
 
 #[tauri::command]
@@ -408,7 +401,7 @@ pub async fn wg_status(app: AppHandle, light: Option<bool>) -> WgStatus {
     let tunnel = running.as_ref().and_then(|_| state.applied_tunnel());
     let checkable = tunnel.as_ref().is_some_and(|t| is_checkable(&app, t));
     let check_kind = checkable.then(|| if internet_through_tunnel(&app) { "internet" } else { "networks" }.to_string());
-    let health = if running.is_some() { state.health.lock().clone() } else { None };
+    let health = if running.is_some() { state.health.lock().clone().filter(|(_, at, _)| at.elapsed().as_secs() < 45) } else { None };
     let alive = health.as_ref().map(|(ok, _, _)| *ok);
     let checked_ago = health.as_ref().map(|(_, at, _)| at.elapsed().as_secs());
     let detail = health.map(|(_, _, d)| d);
@@ -460,6 +453,5 @@ pub fn wg_migrate(app: AppHandle, store: State<'_, SettingsStore>) -> Result<(),
     // applied, and an older version (a rollback) keeps routing exactly as before —
     // clearing them once sent all direct traffic past the user's VPN after a rollback.
     s.wg_migrated = true;
-    store.set(&app, s);
-    Ok(())
+    store.set(&app, s)
 }

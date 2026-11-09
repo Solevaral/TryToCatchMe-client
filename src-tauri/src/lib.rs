@@ -24,6 +24,7 @@ pub mod monitor;
 pub mod profiles;
 pub mod routing;
 pub mod settings;
+mod storage;
 pub mod subscription;
 pub mod sysproxy;
 pub mod tray;

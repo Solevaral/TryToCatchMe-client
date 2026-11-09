@@ -10,7 +10,7 @@ use std::path::PathBuf;
 
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Emitter, Manager};
 
 use ttcm_core::routing::{antifilter_files, build_route, geo_files, service_geo_file, GeoFile, GeoInput, RouteSpec, RoutingConfig, Service};
 
@@ -310,11 +310,17 @@ impl RoutingStore {
         if p.catalog.is_empty() {
             p.catalog = default_catalog();
         }
+        let before = p.clone();
         let changed = migrate(&mut p) | p.config.migrate_antifilter_mode();
-        *self.inner.lock() = Some(p);
         if changed {
-            let _ = self.save(app);
+            let saved = Self::file(app).and_then(|path| crate::storage::save(&path, &p));
+            if let Err(e) = saved {
+                p = before;
+                eprintln!("{e}");
+                let _ = app.emit("app://error", e);
+            }
         }
+        *self.inner.lock() = Some(p);
     }
 
     fn with<R>(&self, f: impl FnOnce(&mut Persisted) -> R) -> R {
@@ -328,16 +334,13 @@ impl RoutingStore {
         f(p)
     }
 
-    fn save(&self, app: &AppHandle) -> Result<(), String> {
-        let path = Self::file(app)?;
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).map_err(|e| format!("create dir: {e}"))?;
-        }
-        let json = {
-            let g = self.inner.lock();
-            serde_json::to_string_pretty(&*g).map_err(|e| format!("serialize: {e}"))?
-        };
-        fs::write(&path, json).map_err(|e| format!("write: {e}"))
+    fn update<R>(&self, app: &AppHandle, change: impl FnOnce(&mut Persisted) -> R) -> Result<R, String> {
+        // Initialize defaults before taking the transaction lock.
+        self.with(|_| ());
+        let mut g = self.inner.lock();
+        let result = crate::storage::transaction(&mut *g, |next| Ok(change(next.as_mut().expect("initialized routing"))), |next| crate::storage::save(&Self::file(app)?, next))?;
+        let _ = app.emit("routing://changed", ());
+        Ok(result)
     }
 
     pub fn snapshot(&self) -> RoutingSnapshot {
@@ -347,28 +350,25 @@ impl RoutingStore {
         })
     }
 
-    pub fn set_config(&self, app: &AppHandle, config: RoutingConfig) {
-        self.with(|p| p.config = config);
-        let _ = self.save(app);
+    pub fn set_config(&self, app: &AppHandle, config: RoutingConfig) -> Result<(), String> {
+        self.update(app, |p| p.config = config)
     }
 
-    pub fn upsert_service(&self, app: &AppHandle, svc: Service) {
-        self.with(|p| {
+    pub fn upsert_service(&self, app: &AppHandle, svc: Service) -> Result<(), String> {
+        self.update(app, |p| {
             if let Some(existing) = p.catalog.iter_mut().find(|s| s.id == svc.id) {
                 *existing = svc;
             } else {
                 p.catalog.push(svc);
             }
-        });
-        let _ = self.save(app);
+        })
     }
 
-    pub fn remove_service(&self, app: &AppHandle, id: &str) {
-        self.with(|p| {
+    pub fn remove_service(&self, app: &AppHandle, id: &str) -> Result<(), String> {
+        self.update(app, |p| {
             p.catalog.retain(|s| s.id != id);
             p.config.services.retain(|s| s.id != id);
-        });
-        let _ = self.save(app);
+        })
     }
 
 
@@ -409,18 +409,10 @@ impl RoutingStore {
 
     /// Apply the library downloaded from GitHub to the user's services (see
     /// `sync_with_library`). Saved only when something changed.
-    pub fn sync_library(&self, app: &AppHandle, remote: &[Service]) -> SyncReport {
-        let (report, changed) = self.with(|p| {
-            let before = p.library_base.clone();
-            let report = sync_with_library(p, remote);
-            let changed = !report.updated.is_empty() || !report.removed.is_empty() || before != p.library_base;
-            (report, changed)
-        });
-        if changed {
-            let _ = self.save(app);
-        }
-        report
+    pub fn sync_library(&self, app: &AppHandle, remote: &[Service]) -> Result<SyncReport, String> {
+        self.update(app, |p| sync_with_library(p, remote))
     }
+
 }
 
 #[cfg(test)]

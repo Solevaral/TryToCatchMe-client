@@ -298,14 +298,19 @@ mod imp {
         run(r, &["--file", "kioslaverc", "--group", "Proxy Settings", "--key", key]).unwrap_or_default()
     }
 
-    fn kde_write(w: &str, key: &str, value: &str) {
+    fn kde_write(w: &str, key: &str, value: &str) -> Result<(), String> {
         let mut args = vec!["--file", "kioslaverc", "--group", "Proxy Settings", "--key", key];
         if value.is_empty() {
             args.push("--delete");
         } else {
             args.push(value);
         }
-        let _ = cmd(w).args(&args).status();
+        checked(cmd(w).args(&args))
+    }
+
+    fn checked(command: &mut std::process::Command) -> Result<(), String> {
+        let status = command.status().map_err(|e| format!("Не удалось изменить системный прокси: {e}"))?;
+        if status.success() { Ok(()) } else { Err(format!("Команда настройки системного прокси завершилась с {status}")) }
     }
 
     fn kde_notify() {
@@ -349,33 +354,33 @@ mod imp {
             let p = port.to_string();
             for scheme in ["http", "https", "socks"] {
                 let schema = format!("org.gnome.system.proxy.{scheme}");
-                let _ = cmd("gsettings").args(["set", &schema, "host", &h]).status();
-                let _ = cmd("gsettings").args(["set", &schema, "port", &p]).status();
+                checked(cmd("gsettings").args(["set", &schema, "host", &h]))?;
+                checked(cmd("gsettings").args(["set", &schema, "port", &p]))?;
             }
-            let _ = cmd("gsettings")
+            checked(cmd("gsettings")
                 .args(["set", "org.gnome.system.proxy", "ignore-hosts", GNOME_BYPASS])
-                .status();
+                )?;
             let mode = match pac {
                 Some(url) => {
-                    let _ = cmd("gsettings").args(["set", "org.gnome.system.proxy", "autoconfig-url", &format!("'{url}'")]).status();
+                    checked(cmd("gsettings").args(["set", "org.gnome.system.proxy", "autoconfig-url", &format!("'{url}'")]))?;
                     "'auto'"
                 }
                 None => "'manual'",
             };
-            let _ = cmd("gsettings").args(["set", "org.gnome.system.proxy", "mode", mode]).status();
+            checked(cmd("gsettings").args(["set", "org.gnome.system.proxy", "mode", mode]))?;
             done = true;
         }
         if let Some((_, w)) = kde_tools() {
-            kde_write(w, "httpProxy", &kde_proxy_value("http", host, port));
-            kde_write(w, "httpsProxy", &kde_proxy_value("http", host, port));
-            kde_write(w, "socksProxy", &kde_proxy_value("socks", host, port));
-            kde_write(w, "NoProxyFor", "localhost,127.0.0.1,::1");
+            kde_write(w, "httpProxy", &kde_proxy_value("http", host, port))?;
+            kde_write(w, "httpsProxy", &kde_proxy_value("http", host, port))?;
+            kde_write(w, "socksProxy", &kde_proxy_value("socks", host, port))?;
+            kde_write(w, "NoProxyFor", "localhost,127.0.0.1,::1")?;
             match pac {
                 Some(url) => {
-                    kde_write(w, "Proxy Config Script", url);
-                    kde_write(w, "ProxyType", "2");
+                    kde_write(w, "Proxy Config Script", url)?;
+                    kde_write(w, "ProxyType", "2")?;
                 }
-                None => kde_write(w, "ProxyType", "1"),
+                None => kde_write(w, "ProxyType", "1")?,
             }
             kde_notify();
             done = true;
@@ -390,16 +395,17 @@ mod imp {
     pub fn restore(s: &Snapshot) -> Result<(), String> {
         if let Some(values) = &s.gnome {
             for (schema, key, value) in values {
-                let _ = cmd("gsettings").args(["set", schema, key, value]).status();
+                checked(cmd("gsettings").args(["set", schema, key, value]))?;
             }
         }
-        if let (Some(values), Some((_, w))) = (&s.kde, kde_tools()) {
+        if let Some(values) = &s.kde {
+            let (_, w) = kde_tools().ok_or("Не найден kwriteconfig для восстановления прокси")?;
             // ProxyType last.
             for (k, v) in values.iter().filter(|(k, _)| k != "ProxyType") {
-                kde_write(w, k, v);
+                kde_write(w, k, v)?;
             }
             if let Some((_, v)) = values.iter().find(|(k, _)| k == "ProxyType") {
-                kde_write(w, "ProxyType", v);
+                kde_write(w, "ProxyType", v)?;
             }
             kde_notify();
         }
@@ -472,3 +478,20 @@ mod imp {
 }
 
 pub use imp::{apply, describe, disabled, points_to, restore, snapshot};
+
+/// Confirm coverage separately from the ownership check used during restoration.
+pub fn matches_applied(host: &str, port: u16) -> bool {
+    #[cfg(windows)]
+    {
+        snapshot().ok().and_then(|s| s.windows).is_some_and(|w| {
+            w.flags & 2 != 0 && w.flags & (4 | 8) == 0
+                && w.server.as_deref().is_some_and(|s| ttcm_core::sysproxy::windows_server_matches(s, host, port))
+        })
+    }
+    #[cfg(target_os = "linux")]
+    {
+        snapshot().is_ok_and(|s| ttcm_core::sysproxy::linux_proxy_matches(s.gnome.as_deref(), s.kde.as_deref(), host, port, &pac_url_base(port)))
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
+    { points_to(host, port) }
+}

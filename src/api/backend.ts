@@ -8,6 +8,13 @@ import { invoke } from "@tauri-apps/api/core";
 export interface CoreStatus {
   /** The VPN is on (the core may also run for a WireGuard tunnel alone). */
   vpn: boolean;
+  health: boolean | null;
+  checked_ago: number | null;
+  uptime: number | null;
+  profile_name: string | null;
+  tun: boolean;
+  tun_up: boolean | null;
+  capture_up: boolean | null;
   running: boolean;
   pid: number | null;
 }
@@ -195,6 +202,7 @@ export interface Profile {
 
 export interface ImportResult {
   added: Profile[];
+  skipped_duplicates: number;
   errors: string[];
   /** The active profile's server changed or vanished — reconnect to apply. */
   active_changed: boolean;
@@ -376,4 +384,16 @@ export interface DiagReport {
 
 export async function diagRun(targets?: string[]): Promise<DiagReport> {
   return await invoke<DiagReport>("diag_run", { targets: targets ?? null });
+}
+
+// Serialize settings patches and merge each against the last saved backend snapshot.
+let settingsQueue: Promise<unknown> = Promise.resolve();
+export function settingsPatch(patch: Partial<Settings>): Promise<Settings> {
+  const next = settingsQueue.then(async () => {
+    const settings = { ...await settingsGet(), ...patch };
+    await settingsSet(settings);
+    return settings;
+  });
+  settingsQueue = next.catch(() => {});
+  return next;
 }

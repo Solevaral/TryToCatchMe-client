@@ -32,7 +32,7 @@ export default function ListEditor(props: {
               className="btn"
               style={{ padding: "0 6px", marginLeft: 4 }}
               title="Удалить"
-              onClick={() => props.onChange(props.items.filter((i) => i !== item))}
+              onClick={() => { if (window.confirm("Удалить элемент списка?")) props.onChange(props.items.filter((i) => i !== item)); }}
             >
               ×
             </button>

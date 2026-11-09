@@ -24,6 +24,19 @@ pub fn pac_port(mixed_port: u16) -> u16 {
     mixed_port.saturating_add(2)
 }
 
+/// Validate every listener reserved around the configured proxy port.
+pub fn validate_ports(proxy_port: u16, clash_port: u16, linux_pac: bool) -> Result<(), String> {
+    let offset = if linux_pac { 2 } else { 1 };
+    let max = u16::MAX - offset;
+    if proxy_port < 1024 || proxy_port > max {
+        return Err(format!("Порт прокси должен быть от 1024 до {max}"));
+    }
+    if (proxy_port..=proxy_port + offset).contains(&clash_port) {
+        return Err(format!("Порт прокси и служебные порты конфликтуют с Clash API ({clash_port})"));
+    }
+    Ok(())
+}
+
 pub struct GenOptions {
     /// Port of the local mixed (HTTP+SOCKS) proxy. The OS system proxy itself is
     /// managed by the app, never by sing-box: the core is stopped with a hard kill, and
@@ -731,9 +744,15 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "BUG: configured proxy port can collide with the Clash controller"]
     fn proxy_port_must_not_collide_with_controller() {
-        assert_config_references(&generate(&GenOptions { mixed_port: 9090, ..only_youtube() }));
+        for port in [9089, 9090, 0, 1023, 65535] {
+            assert!(validate_ports(port, 9090, false).is_err());
+        }
+        assert!(validate_ports(9088, 9090, false).is_ok());
+        assert!(validate_ports(9088, 9090, true).is_err());
+        assert!(validate_ports(65534, 9090, true).is_err());
+        assert!(validate_ports(65533, 9090, true).is_ok());
+        assert!(validate_ports(MIXED_PORT, 9090, true).is_ok());
     }
 
     fn proxy() -> Value {

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { useLogStore } from "../store/logStore";
+import { useAppStore } from "../store/appStore";
 
 const LEVELS = ["all", "info", "warning", "error", "debug"] as const;
 type Level = (typeof LEVELS)[number];
@@ -51,14 +52,15 @@ export default function LogsPage() {
     const text = filtered.map((l) => `${ts(l.t)} [${l.level}] ${l.msg}`).join("\n");
     try {
       await writeText(text);
-    } catch {
-      /* ignore */
+    } catch (e) {
+      useAppStore.getState().setLastError(String(e));
     }
   }
 
   return (
     <div>
       <h1 className="page-title">Логи</h1>
+      <div className="muted">История сообщений · {logs.length ? `последнее сообщение ${ts(logs[logs.length - 1].t)}` : "сообщений ещё нет"}</div>
 
       <div style={{ display: "flex", gap: 8, marginBottom: 12, flexWrap: "wrap" }}>
         {LEVELS.map((lv) => (
@@ -95,7 +97,7 @@ export default function LogsPage() {
         <button className="btn" style={{ padding: "5px 10px" }} onClick={copyAll}>
           Копировать
         </button>
-        <button className="btn" style={{ padding: "5px 10px" }} onClick={clear}>
+        <button className="btn" style={{ padding: "5px 10px" }} onClick={() => { if (window.confirm("Очистить журнал?")) clear(); }}>
           Очистить
         </button>
       </div>
@@ -121,7 +123,7 @@ export default function LogsPage() {
         )}
         {filtered.length === 0 ? (
           <div className="muted">
-            Логов пока нет. Подключитесь — здесь появится живой поток от ядра sing-box.
+            {logs.length ? "Нет строк для выбранного фильтра." : "Логов пока нет. При работе ядра здесь появится поток сообщений."}
           </div>
         ) : (
           shown.map((l, i) => (

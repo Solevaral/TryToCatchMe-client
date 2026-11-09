@@ -2,8 +2,11 @@ import { useEffect, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { useAppStore, type Page } from "./store/appStore";
 import { useLogStore } from "./store/logStore";
-import { coreStatus, traySetState, relaunchAdmin, settingsGet, settingsSet, wgRestart, wgStatus, type WgStatus } from "./api/backend";
+import { coreStatus, relaunchAdmin, settingsPatch, wgRestart, wgStatus, type WgStatus } from "./api/backend";
 import { useConnection } from "./hooks/useConnection";
+import { useFreshData } from "./hooks/useFreshData";
+import ErrorBanner from "./components/ErrorBanner";
+import type { CoreStatus } from "./api/backend";
 import SysProxyLine from "./components/SysProxyLine";
 import ProfilesPage from "./pages/ProfilesPage";
 import RoutingPage from "./pages/RoutingPage";
@@ -28,6 +31,14 @@ const STATUS_LABEL: Record<string, string> = {
   error: "Ошибка",
 };
 
+function connectionLabel(status: string, core: CoreStatus | null): string {
+  if (status !== "connected") return STATUS_LABEL[status];
+  if (core?.tun && core.tun_up !== true) return "Ядро запущено, TUN не подтверждён";
+  if (core?.capture_up !== true) return "Ядро запущено, перехват не подтверждён";
+  if (core.health === false) return "Подключено, но сервер не отвечает";
+  return core.health === true ? "Связь проверена" : "Ядро запущено, проверяю связь…";
+}
+
 function fmtSpeed(bytesPerSec: number): string {
   if (bytesPerSec < 1024) return `${bytesPerSec} B/s`;
   const kb = bytesPerSec / 1024;
@@ -47,17 +58,24 @@ export default function App() {
   const warm = useAppStore((s) => s.warm);
   const setWarm = useAppStore((s) => s.setWarm);
 
-  // Sync status from the core at startup (window may have been reopened from tray).
+  const [core, setCore] = useState<CoreStatus | null>(null);
+  useFreshData(async () => {
+    try {
+      const s = await coreStatus();
+      setCore(s);
+      if (useAppStore.getState().status !== "connecting") {
+        setStatus(s.vpn ? "connected" : useAppStore.getState().status === "error" ? "error" : "disconnected");
+      }
+      if (!s.running || Date.now() - useAppStore.getState().lastTrafficAt > 5000) setTraffic(0, 0);
+      if (!s.running) setWarm("");
+      if (s.health === true) setWarm("");
+    } catch (e) { setCore(null); setStatus("error"); setTraffic(0, 0); setLastError(String(e)); }
+  }, ["core://status", "vpn://state"], 4000);
   useEffect(() => {
-    coreStatus()
-      .then((s) => {
-        if (s.vpn) {
-          setStatus("connected");
-          traySetState("connected").catch(() => {});
-        }
-      })
-      .catch(() => {});
-  }, [setStatus]);
+    const handler = (event: PromiseRejectionEvent) => { setLastError(String(event.reason)); event.preventDefault(); };
+    window.addEventListener("unhandledrejection", handler);
+    return () => window.removeEventListener("unhandledrejection", handler);
+  }, [setLastError]);
 
   // Global backend event listeners (tray actions, traffic, vpn state).
   useEffect(() => {
@@ -100,16 +118,16 @@ export default function App() {
           return;
         }
         try {
-          const st = await settingsGet();
-          await settingsSet({ ...st, capture_tun: false });
+          await settingsPatch({ capture_tun: false });
           useLogStore.getState().add("app", "TUN выключен — используется системный прокси. Нажмите «Подключить» ещё раз.");
-        } catch {
-          /* ignore */
+        } catch (e) {
+          setLastError(String(e));
         }
       })
     );
     unlisteners.push(
       listen("app://run-diagnostics", () => {
+        useAppStore.getState().requestDiagnostics();
         setPage("diagnostics");
         window.dispatchEvent(new CustomEvent("ttcm:run-diagnostics"));
       })
@@ -154,7 +172,7 @@ export default function App() {
 
   const dotClass =
     status === "connected"
-      ? "dot ok"
+      ? core?.health === true && core.capture_up === true ? "dot ok" : "dot warn"
       : status === "error"
       ? "dot err"
       : status === "connecting"
@@ -181,7 +199,7 @@ export default function App() {
           <ConnControls />
           <div className="conn-pill">
             <span className={dotClass} />
-            <span>{STATUS_LABEL[status]}</span>
+            <span>{connectionLabel(status, core)}</span>
           </div>
           {status === "error" && lastError && (
             <div
@@ -212,7 +230,16 @@ export default function App() {
               Трафик через сервер не проходит — проверьте профиль
             </div>
           )}
-          <SysProxyLine connected={status === "connected"} />
+          {status === "connected" && core?.profile_name && (
+            <div className="muted" style={{ fontSize: 11, marginTop: 6 }}>
+              {core.profile_name} · с {new Date(Date.now() - (core.uptime ?? 0) * 1000).toLocaleTimeString()}
+              {" · "}{Math.floor((core.uptime ?? 0) / 60)} мин {(core.uptime ?? 0) % 60} с
+            </div>
+          )}
+          {status === "connected" && core?.checked_ago != null && (
+            <div className="muted" style={{ fontSize: 11 }}>Последняя проверка связи · {core.checked_ago} с назад</div>
+          )}
+          <SysProxyLine connected={status === "connected"} tun={core?.tun ?? false} />
           {status === "connected" && <Speed />}
         </div>
       </aside>
@@ -242,7 +269,7 @@ function ConnControls() {
   const [wgBusy, setWgBusy] = useState(false);
   useEffect(() => {
     let alive = true;
-    const tick = () => wgStatus(true).then((s) => alive && setWg(s)).catch(() => {});
+    const tick = () => { if (document.hidden) return; return wgStatus(true).then((s) => alive && setWg(s)).catch(() => alive && setWg(null)); };
     tick();
     const t = setInterval(tick, 3000);
     return () => {
@@ -255,8 +282,8 @@ function ConnControls() {
     try {
       await wgRestart();
       setWg(await wgStatus(true));
-    } catch {
-      /* the reason is in the log */
+    } catch (e) {
+      useAppStore.getState().setLastError(String(e));
     } finally {
       setWgBusy(false);
     }
@@ -301,8 +328,10 @@ function ConnControls() {
 }
 
 function MainContent({ page }: { page: Page }) {
+  const error = useAppStore((s) => s.lastError);
   return (
     <main className="content">
+      <ErrorBanner text={error} dismiss={() => useAppStore.getState().setLastError(null)} />
       {page === "profiles" && <ProfilesPage />}
       {page === "routing" && <RoutingPage />}
       {page === "wireguard" && <WireGuardPage />}

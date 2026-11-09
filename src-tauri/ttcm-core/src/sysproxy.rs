@@ -32,6 +32,48 @@ pub fn windows_server_points_to(server: &str, host: &str, port: u16) -> bool {
     !entries.is_empty() && entries.iter().any(|e| e.eq_ignore_ascii_case(&want))
 }
 
+/// Full manual-proxy coverage, distinct from partial ownership during restore.
+pub fn windows_server_matches(server: &str, host: &str, port: u16) -> bool {
+    let entries: Vec<&str> = server.split(';').map(str::trim).filter(|e| !e.is_empty()).collect();
+    let covers_web = !server.contains('=') || ["http", "https"].iter().all(|scheme| {
+        entries.iter().any(|e| e.split_once('=').is_some_and(|(key, _)| key.eq_ignore_ascii_case(scheme)))
+    });
+    covers_web && !entries.is_empty() && entries.iter().all(|e| windows_server_points_to(e, host, port))
+}
+
+pub fn linux_proxy_matches(
+    gnome: Option<&[(String, String, String)]>,
+    kde: Option<&[(String, String)]>,
+    host: &str,
+    port: u16,
+    pac: &str,
+) -> bool {
+    let gnome_ok = gnome.map(|values| {
+        let get = |schema: &str, key: &str| values.iter().find(|(s, k, _)| s == schema && k == key).map(|(_, _, v)| gvariant_plain(v)).unwrap_or_default();
+        match get("org.gnome.system.proxy", "mode").as_str() {
+            "manual" => ["http", "https", "socks"].iter().all(|scheme| {
+                let schema = format!("org.gnome.system.proxy.{scheme}");
+                get(&schema, "host") == host && get(&schema, "port") == port.to_string()
+            }),
+            "auto" => pac_matches(&get("org.gnome.system.proxy", "autoconfig-url"), pac),
+            _ => false,
+        }
+    });
+    let kde_ok = kde.map(|values| {
+        let get = |key: &str| values.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str()).unwrap_or("");
+        match get("ProxyType") {
+            "1" => ["httpProxy", "httpsProxy", "socksProxy"].iter().all(|key| kde_value_points_to(get(key), host, port)),
+            "2" => pac_matches(get("Proxy Config Script"), pac),
+            _ => false,
+        }
+    });
+    (gnome_ok.is_some() || kde_ok.is_some()) && gnome_ok.unwrap_or(true) && kde_ok.unwrap_or(true)
+}
+
+fn pac_matches(current: &str, expected: &str) -> bool {
+    current == expected || current.strip_prefix(expected).is_some_and(|suffix| suffix.starts_with('?'))
+}
+
 /// `'manual'` -> `manual`, `"x"` -> `x`, `2080` -> `2080` (gsettings output).
 pub fn gvariant_plain(raw: &str) -> String {
     let t = raw.trim();
@@ -56,6 +98,30 @@ pub fn kde_value_points_to(value: &str, host: &str, port: u16) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn partial_proxy_ownership_does_not_confirm_web_coverage() {
+        let partial = "http=127.0.0.1:2080;https=127.0.0.1:9999";
+        assert!(windows_server_points_to(partial, "127.0.0.1", 2080));
+        assert!(!windows_server_matches(partial, "127.0.0.1", 2080));
+        assert!(!windows_server_matches("http=127.0.0.1:2080", "127.0.0.1", 2080));
+        assert!(windows_server_matches("127.0.0.1:2080", "127.0.0.1", 2080));
+        assert!(windows_server_matches("http=127.0.0.1:2080;https=127.0.0.1:2080", "127.0.0.1", 2080));
+    }
+
+    #[test]
+    fn linux_checks_every_protocol_and_pac_boundary() {
+        let mut kde = vec![("ProxyType".into(), "1".into())];
+        for key in ["httpProxy", "httpsProxy", "socksProxy"] {
+            kde.push((key.into(), "http://127.0.0.1 2080".into()));
+        }
+        assert!(linux_proxy_matches(None, Some(&kde), "127.0.0.1", 2080, "http://local/proxy.pac"));
+        kde[2].1 = "http://127.0.0.1 9999".into();
+        assert!(!linux_proxy_matches(None, Some(&kde), "127.0.0.1", 2080, "http://local/proxy.pac"));
+        assert!(!linux_proxy_matches(None, None, "127.0.0.1", 2080, "http://local/proxy.pac"));
+        assert!(pac_matches("http://local/proxy.pac?123", "http://local/proxy.pac"));
+        assert!(!pac_matches("http://local/proxy.pac.evil", "http://local/proxy.pac"));
+    }
 
     #[test]
     fn bypass_lists_cover_lan_without_duplicates() {

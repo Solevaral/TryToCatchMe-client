@@ -22,6 +22,8 @@ use os::{Snapshot, HOST};
 struct Backup {
     port: u16,
     snapshot: Snapshot,
+    #[serde(default)]
+    restore_pending: bool,
 }
 
 #[derive(Default)]
@@ -56,16 +58,20 @@ fn read_backup(app: &AppHandle) -> Option<Backup> {
 
 fn write_backup(app: &AppHandle, backup: &Backup) -> Result<(), String> {
     let path = backup_path(app).ok_or("нет папки настроек")?;
-    if let Some(dir) = path.parent() {
-        let _ = fs::create_dir_all(dir);
-    }
-    let json = serde_json::to_string_pretty(backup).map_err(|e| e.to_string())?;
-    fs::write(path, json).map_err(|e| format!("не удалось сохранить резервную копию прокси: {e}"))
+    crate::storage::save(&path, backup)
 }
 
-fn delete_backup(app: &AppHandle) {
-    if let Some(p) = backup_path(app) {
-        let _ = fs::remove_file(p);
+fn delete_backup(app: &AppHandle) -> Result<(), String> {
+    // If deletion fails after a successful restore, never retry that restore later.
+    if let Some(mut backup) = read_backup(app) {
+        backup.restore_pending = false;
+        write_backup(app, &backup)?;
+    }
+    let path = backup_path(app).ok_or("Нет папки настроек")?;
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(format!("Настройки восстановлены, но удалить резервную копию не удалось: {e}")),
     }
 }
 
@@ -81,7 +87,7 @@ impl SysProxyState {
             None if os::points_to(HOST, port) => os::disabled(),
             None => os::snapshot()?,
         };
-        write_backup(app, &Backup { port, snapshot })?;
+        write_backup(app, &Backup { port, snapshot, restore_pending: false })?;
         let mut note = None;
         let pac_url = pac.and_then(|script| match self.pac.serve(ttcm_core::config::pac_port(port), script) {
             // A fresh query each connect: apps re-fetch the script when the URL changes.
@@ -102,36 +108,53 @@ impl SysProxyState {
     /// Put the user's previous settings back (if the proxy still points at us).
     /// Returns a message for the log when something was restored or skipped.
     pub fn release(&self, app: &AppHandle) -> Option<String> {
-        let port = self.applied.lock().take()?;
+        let port = (*self.applied.lock()).or_else(|| read_backup(app).map(|b| b.port))?;
+        let mut attempted = false;
+        let mut restored = false;
         self.pac.set_direct();
         *self.pac_url.lock() = None;
-        let backup = read_backup(app);
-        let msg = if os::points_to(HOST, port) {
+        let mut backup = read_backup(app);
+        let msg = if should_restore_backup(os::points_to(HOST, port), backup.as_ref().is_some_and(|b| b.restore_pending)) {
+            attempted = true;
+            if let Some(b) = backup.as_mut() {
+                b.restore_pending = true;
+                if let Err(e) = write_backup(app, b) { return Some(e); }
+            }
             let snap = backup.map(|b| b.snapshot).unwrap_or_else(os::disabled);
             match os::restore(&snap) {
-                Ok(()) => "Системный прокси возвращён к прежним настройкам".to_string(),
+                Ok(()) => { restored = true; "Системный прокси возвращён к прежним настройкам".to_string() },
                 Err(e) => format!("Не удалось вернуть системный прокси: {e}. Отключите прокси вручную в настройках системы."),
             }
         } else {
             "Системный прокси уже изменён другой программой — не трогаю его".to_string()
         };
-        delete_backup(app);
+        if may_delete_backup(attempted, restored) {
+            if let Err(e) = delete_backup(app) { return Some(e); }
+        }
+        if restored || !os::points_to(HOST, port) { *self.applied.lock() = None; }
         Some(msg)
     }
 
     /// On startup: clean up after a crash/kill that left the proxy pointing at us.
     pub fn recover(&self, app: &AppHandle, configured_port: u16) -> Option<String> {
         match read_backup(app) {
-            Some(b) => {
-                let msg = if os::points_to(HOST, b.port) {
+            Some(mut b) => {
+                let mut restored = false;
+                let mut attempted = false;
+                let msg = if should_restore_backup(os::points_to(HOST, b.port), b.restore_pending) {
+                    attempted = true;
+                    b.restore_pending = true;
+                    if let Err(e) = write_backup(app, &b) { return Some(e); }
                     match os::restore(&b.snapshot) {
-                        Ok(()) => Some("Приложение в прошлый раз завершилось аварийно — системный прокси возвращён к прежним настройкам".to_string()),
+                        Ok(()) => { restored = true; Some("Приложение в прошлый раз завершилось аварийно — системный прокси возвращён к прежним настройкам".to_string()) },
                         Err(e) => Some(format!("Не удалось вернуть системный прокси после аварийного завершения: {e}")),
                     }
                 } else {
                     None
                 };
-                delete_backup(app);
+                if may_delete_backup(attempted, restored) {
+                    if let Err(e) = delete_backup(app) { return Some(e); }
+                }
                 msg
             }
             // No backup, but the proxy points at our port (e.g. left behind by an older
@@ -156,7 +179,7 @@ impl SysProxyState {
         let applied_port = *self.applied.lock();
         SysProxyStatus {
             applied_port,
-            ours: applied_port.map(|p| os::points_to(HOST, p)).unwrap_or(false),
+            ours: applied_port.map(|p| os::matches_applied(HOST, p)).unwrap_or(false),
             current: os::describe(),
         }
     }
@@ -165,7 +188,7 @@ impl SysProxyState {
     /// ours while applied; `None` otherwise.
     pub fn check_overwritten(&self) -> Option<String> {
         let port = (*self.applied.lock())?;
-        if os::points_to(HOST, port) {
+        if os::matches_applied(HOST, port) {
             self.overwrite_reported.store(false, Ordering::SeqCst);
             return None;
         }
@@ -179,4 +202,24 @@ impl SysProxyState {
 /// Convenience: the configured local proxy port.
 pub fn configured_port(app: &AppHandle) -> u16 {
     app.state::<crate::settings::SettingsStore>().get().proxy_port
+}
+
+/// Keep the backup only when a restore was attempted and failed (retry later). A skipped
+/// restore (another program owns the proxy now) must drop it, or the next connect would
+/// reuse the stale snapshot and clobber that program's settings on disconnect.
+fn may_delete_backup(attempted: bool, restored: bool) -> bool { restored || !attempted }
+
+fn should_restore_backup(ours: bool, pending: bool) -> bool { ours || pending }
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn backup_survives_failed_or_skipped_restore() {
+        assert!(!super::may_delete_backup(true, false));
+        assert!(super::may_delete_backup(true, true));
+        assert!(super::may_delete_backup(false, false));
+        assert!(super::should_restore_backup(false, true));
+        assert!(super::should_restore_backup(true, false));
+        assert!(!super::should_restore_backup(false, false));
+    }
 }

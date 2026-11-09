@@ -8,7 +8,6 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::thread::JoinHandle;
 use std::time::Duration;
 
 use parking_lot::Mutex;
@@ -27,24 +26,39 @@ const FAIL_THRESHOLD: u32 = 3;
 #[derive(Default)]
 pub struct Monitor {
     stop: Mutex<Option<Arc<AtomicBool>>>,
-    handle: Mutex<Option<JoinHandle<()>>>,
 }
 
 impl Monitor {
     pub fn start(&self, app: AppHandle) {
-        self.stop();
+        let mut owner = self.stop.lock();
+        if let Some(old) = owner.take() { old.store(true, Ordering::SeqCst); }
         let flag = Arc::new(AtomicBool::new(false));
-        *self.stop.lock() = Some(flag.clone());
-        let handle = std::thread::spawn(move || run_loop(app, flag));
-        *self.handle.lock() = Some(handle);
+        *owner = Some(flag.clone());
+        let watcher_app = app.clone();
+        let watcher_flag = flag.clone();
+        std::thread::spawn(move || {
+            let mut reported = false;
+            while !watcher_flag.load(Ordering::SeqCst) {
+                std::thread::sleep(Duration::from_secs(WATCH_INTERVAL_SECS));
+                if watcher_flag.load(Ordering::SeqCst) { return; }
+                // Independent of slow health probes. Cleanup stays in the operation loop.
+                if watcher_app.state::<CoreState>().died_unexpectedly() && !reported {
+                    reported = true;
+                    crate::tray::set_state(&watcher_app, "error");
+                    let _ = watcher_app.emit("vpn://state", "error");
+                    let _ = watcher_app.emit("core://status", watcher_app.state::<CoreState>().status());
+                } else if watcher_app.state::<CoreState>().status().running {
+                    reported = false;
+                }
+            }
+        });
+        std::thread::spawn(move || run_loop(app, flag));
     }
 
     pub fn stop(&self) {
+        // Detached worker checks cancellation after acquiring op. Never join under op.
         if let Some(flag) = self.stop.lock().take() {
             flag.store(true, Ordering::SeqCst);
-        }
-        if let Some(h) = self.handle.lock().take() {
-            let _ = h.join();
         }
     }
 }
@@ -68,8 +82,7 @@ struct Strikes {
     wg_checks: u32,
 }
 
-/// Re-plan the core off the monitor thread: `core::apply` stops the monitor (joins it),
-/// so calling it from here would deadlock.
+/// Re-plan after releasing the monitor operation guard. Apply owns the next worker.
 fn apply_detached(app: &AppHandle) {
     let app = app.clone();
     std::thread::spawn(move || {
@@ -177,15 +190,16 @@ fn watch(app: &AppHandle) {
         let _ = app.emit("vpn://state", "error".to_string());
         let _ = app.emit(
             "app://error",
-            "Ядро sing-box неожиданно завершилось — системный прокси возвращён. Причина — в строках лога выше.".to_string(),
+            "Ядро sing-box неожиданно завершилось. Результат восстановления системного прокси и причина завершения — в журнале.".to_string(),
         );
         return;
     }
     if let Some(current) = app.state::<crate::sysproxy::SysProxyState>().check_overwritten() {
+        crate::tray::set_state(app, "degraded");
         let _ = app.emit("sysproxy://overwritten", current.clone());
         let _ = app.emit(
             "app://error",
-            format!("Системный прокси перезаписан другой программой (сейчас: {current}) — браузеры идут мимо VPN. Нажмите «Применить снова»."),
+            format!("Системный прокси изменён или недоступен для проверки (сейчас: {current}). Перехват через него не подтверждён. Нажмите «Применить снова»."),
         );
     }
 }
@@ -200,9 +214,20 @@ fn run_loop(app: AppHandle, stop: Arc<AtomicBool>) {
             return;
         }
         std::thread::sleep(Duration::from_secs(1));
+        let core = app.state::<CoreState>();
         tick += 1;
         if tick % WATCH_INTERVAL_SECS == 0 {
-            watch(&app);
+            // The op guard covers only quick state actions, never a network probe: a
+            // held guard would make Disconnect / Apply wait for the probe.
+            {
+                let Some(_operation) = core.op.try_lock() else { continue };
+                if stop.load(Ordering::SeqCst) { return; }
+                watch(&app);
+            }
+            core.refresh_capture(&app);
+            let status = core.status();
+            let _ = app.emit("core://status", status.clone());
+            if status.vpn && (status.capture_up != Some(true) || status.health != Some(true)) { crate::tray::set_state(&app, "degraded"); }
             if watch_hang(&app, &mut strikes) {
                 continue;
             }
@@ -220,30 +245,35 @@ fn run_loop(app: AppHandle, stop: Arc<AtomicBool>) {
         if !app.state::<CoreState>().vpn_connected() {
             continue;
         }
-        if !app.state::<SettingsStore>().get().auto_switch_on() {
-            fails = 0;
-            continue;
-        }
-
         let ok = crate::diag::clash_delay("http://www.gstatic.com/generate_204", 5000).is_some();
+        if stop.load(Ordering::SeqCst) { return; }
+        core.record_health(&app, ok);
         if ok {
             fails = 0;
             continue;
         }
 
+        if !app.state::<SettingsStore>().get().auto_switch_on() { fails = 0; continue; }
         fails += 1;
-        if fails < FAIL_THRESHOLD {
+        if !failover_due(stop.load(Ordering::SeqCst), app.state::<SettingsStore>().get().auto_switch_on(), fails) {
             continue;
         }
         fails = 0;
 
         // Rotate to the next profile and restart the tunnel.
+        // Held through set_active + restart (re-entrant); re-check cancellation under it so
+        // a monitor stopped by the user's Disconnect never restarts the core.
+        let _operation = core.op.lock();
+        if stop.load(Ordering::SeqCst) || !core.vpn_connected() { return; }
         let profiles = app.state::<ProfileStore>();
         if let Some(next) = profiles.next_active_id() {
             let name = profiles.name_of(&next).unwrap_or_else(|| next.clone());
             // Только в журнал: экспериментальная функция, без уведомлений.
             let _ = app.emit("app://log", format!("Автопереключение: активный профиль недоступен, переключаюсь на «{name}»"));
-            profiles.set_active(&app, Some(next));
+            if let Err(e) = profiles.set_active(&app, Some(next)) {
+                let _ = app.emit("app://error", e);
+                continue;
+            }
             app.state::<ClashStreams>().stop();
             match app.state::<CoreState>().restart(&app) {
                 Ok(()) => {
@@ -255,6 +285,25 @@ fn run_loop(app: AppHandle, stop: Arc<AtomicBool>) {
                     crate::tray::set_state(&app, "error");
                     let _ = app.emit("vpn://state", "error".to_string());
                     let _ = app.emit("app://error", format!("Не удалось переключиться на «{name}»: {e}"));
+                }
+            }
+        }
+    }
+}
+
+fn failover_due(cancelled: bool, enabled: bool, failures: u32) -> bool {
+    !cancelled && enabled && failures >= FAIL_THRESHOLD
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn cancelled_monitor_never_requests_failover() {
+        for cancelled in [false, true] {
+            for enabled in [false, true] {
+                for failures in [0, FAIL_THRESHOLD - 1, FAIL_THRESHOLD, FAIL_THRESHOLD + 1] {
+                    assert_eq!(failover_due(cancelled, enabled, failures), !cancelled && enabled && failures >= FAIL_THRESHOLD);
                 }
             }
         }

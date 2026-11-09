@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useState } from "react";
-import { listen } from "@tauri-apps/api/event";
+import { useCallback, useState } from "react";
+import { useFreshData } from "../hooks/useFreshData";
+import { useAppStore } from "../store/appStore";
 import { sysproxyReapply, sysproxyStatus, type SysProxyStatus } from "../api/backend";
 
 /**
@@ -7,34 +8,24 @@ import { sysproxyReapply, sysproxyStatus, type SysProxyStatus } from "../api/bac
  * one-click fix) when another program — e.g. another VPN client — took the single
  * system-proxy slot over.
  */
-export default function SysProxyLine({ connected }: { connected: boolean }) {
+export default function SysProxyLine({ connected, tun }: { connected: boolean; tun: boolean }) {
   const [st, setSt] = useState<SysProxyStatus | null>(null);
   const [busy, setBusy] = useState(false);
 
-  const refresh = useCallback(() => {
-    sysproxyStatus().then(setSt).catch(() => setSt(null));
-  }, []);
+  const refresh = useCallback(async () => {
+    if (!connected) { setSt(null); return; }
+    await sysproxyStatus().then(setSt).catch(() => setSt(null));
+  }, [connected]);
 
-  useEffect(() => {
-    if (!connected) {
-      setSt(null);
-      return;
-    }
-    refresh();
-    const t = setInterval(refresh, 3000);
-    const un = listen("sysproxy://overwritten", refresh);
-    return () => {
-      clearInterval(t);
-      un.then((f) => f()).catch(() => {});
-    };
-  }, [connected, refresh]);
+  useFreshData(async () => { await refresh(); }, ["sysproxy://overwritten", "vpn://state"], 4000);
 
-  if (!connected || !st) return null;
+  if (!connected) return null;
+  if (!st) return <div className="muted" style={{ fontSize: 11 }}>Состояние системного прокси неизвестно</div>;
 
   if (st.applied_port === null) {
     return (
       <div className="muted" style={{ fontSize: 11, marginTop: 6 }}>
-        Системный прокси не настроен приложением — см. логи
+        {tun ? "Перехват TUN · системный прокси приложением не управляется" : "Системный прокси не применён — браузеры могут идти мимо VPN"}
       </div>
     );
   }
@@ -49,7 +40,7 @@ export default function SysProxyLine({ connected }: { connected: boolean }) {
 
   return (
     <div style={{ fontSize: 11, marginTop: 6, color: "var(--warn)" }}>
-      Системный прокси перехвачен другой программой (сейчас: {st.current}) — браузеры идут мимо VPN.
+      Системный прокси изменён или недоступен для проверки (сейчас: {st.current}). Перехват через него не подтверждён.
       <button
         className="btn"
         style={{ width: "100%", marginTop: 6, padding: "4px 8px", fontSize: 12 }}
@@ -58,8 +49,8 @@ export default function SysProxyLine({ connected }: { connected: boolean }) {
           setBusy(true);
           try {
             await sysproxyReapply();
-          } catch {
-            /* the error is logged by the backend */
+          } catch (e) {
+            useAppStore.getState().setLastError(String(e));
           }
           setBusy(false);
           refresh();

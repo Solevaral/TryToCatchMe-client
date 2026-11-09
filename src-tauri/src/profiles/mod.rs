@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Emitter, Manager};
 
 use crate::links::{self, Profile};
 use crate::subscription::Fetched;
@@ -44,6 +44,7 @@ pub struct ProfileStore {
 #[derive(Serialize, Clone)]
 pub struct ImportResult {
     pub added: Vec<Profile>,
+    pub skipped_duplicates: usize,
     pub errors: Vec<String>,
     /// The active profile's server changed or vanished — reconnect to apply.
     pub active_changed: bool,
@@ -51,7 +52,7 @@ pub struct ImportResult {
 
 impl ImportResult {
     pub fn error(e: String) -> Self {
-        ImportResult { added: Vec::new(), errors: vec![e], active_changed: false }
+        ImportResult { skipped_duplicates: 0, added: Vec::new(), errors: vec![e], active_changed: false }
     }
 }
 
@@ -75,14 +76,11 @@ impl ProfileStore {
         }
     }
 
-    fn save(&self, app: &AppHandle) -> Result<(), String> {
-        let path = Self::file(app)?;
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).map_err(|e| format!("create dir: {e}"))?;
-        }
-        let data = serde_json::to_string_pretty(&*self.inner.lock())
-            .map_err(|e| format!("serialize: {e}"))?;
-        fs::write(&path, data).map_err(|e| format!("write: {e}"))
+    fn with<R>(&self, app: &AppHandle, change: impl FnOnce(&mut Persisted) -> Result<R, String>) -> Result<R, String> {
+        let mut g = self.inner.lock();
+        let result = crate::storage::transaction(&mut *g, change, |next| crate::storage::save(&Self::file(app)?, next))?;
+        let _ = app.emit("profiles://changed", ());
+        Ok(result)
     }
 
     pub fn list(&self) -> Vec<Profile> {
@@ -103,24 +101,14 @@ impl ProfileStore {
     /// Parse text (links or subscription) and add the resulting profiles.
     pub fn import(&self, app: &AppHandle, text: &str) -> ImportResult {
         let (parsed, errors) = links::parse_many(text);
-        {
-            let mut g = self.inner.lock();
-            for p in &parsed {
-                g.profiles.push(p.clone());
-            }
-            // Auto-select the first profile if none is active yet.
+        let result = self.with(app, |g| {
+            let (added, skipped_duplicates) = append_manual(&mut g.profiles, parsed);
             if g.active.is_none() {
-                if let Some(first) = g.profiles.first() {
-                    g.active = Some(first.id.clone());
-                }
+                g.active = g.profiles.first().map(|p| p.id.clone());
             }
-        }
-        let _ = self.save(app);
-        ImportResult {
-            added: parsed,
-            errors,
-            active_changed: false,
-        }
+            Ok(ImportResult { added, errors, active_changed: false, skipped_duplicates })
+        });
+        result.unwrap_or_else(ImportResult::error)
     }
 
     pub fn subscriptions(&self) -> Vec<Subscription> {
@@ -142,12 +130,11 @@ impl ProfileStore {
             if errors.is_empty() {
                 errors.push("в подписке нет ссылок подключения".into());
             }
-            return ImportResult { added: Vec::new(), errors, active_changed: false };
+            return ImportResult { skipped_duplicates: 0, added: Vec::new(), errors, active_changed: false };
         }
 
-        let active_changed;
-        {
-            let mut g = self.inner.lock();
+        let result = self.with(app, |g| {
+            let active_changed;
             let sub_id = match g.subscriptions.iter_mut().find(|s| s.url == url) {
                 Some(s) => {
                     s.name = fetched.title;
@@ -209,7 +196,7 @@ impl ProfileStore {
                 // Сервер пропал: переключение на другой — только с автопереключением
                 // (экспериментальная функция). Иначе туннель работает со старыми
                 // параметрами, пока пользователь не выберет сервер сам.
-                (Some(_), None) => auto_switch,
+                (Some(_), None) => true,
                 (None, _) => false,
             };
             if active_now.is_none() {
@@ -220,39 +207,40 @@ impl ProfileStore {
                     errors.push(format!("сервер «{name}», выбранный для подключения, пропал из подписки — выберите другой сервер"));
                 }
             }
-        }
-        let _ = self.save(app);
-        ImportResult { added: parsed, errors, active_changed }
+            Ok(ImportResult { skipped_duplicates: 0, added: parsed, errors, active_changed })
+        });
+        result.unwrap_or_else(ImportResult::error)
     }
 
     /// Remove a subscription together with its servers.
-    pub fn remove_subscription(&self, app: &AppHandle, id: &str) {
-        {
-            let mut g = self.inner.lock();
+    pub fn remove_subscription(&self, app: &AppHandle, id: &str) -> Result<(), String> {
+        self.with(app, |g| {
             g.subscriptions.retain(|s| s.id != id);
             g.profiles.retain(|p| p.subscription.as_deref() != Some(id));
             let active_ok = g.active.as_ref().is_some_and(|a| g.profiles.iter().any(|p| &p.id == a));
             if !active_ok {
                 g.active = g.profiles.first().map(|p| p.id.clone());
             }
-        }
-        let _ = self.save(app);
+            Ok(())
+        })
     }
 
-    pub fn remove(&self, app: &AppHandle, id: &str) {
-        {
-            let mut g = self.inner.lock();
+    pub fn remove(&self, app: &AppHandle, id: &str) -> Result<(), String> {
+        self.with(app, |g| {
             g.profiles.retain(|p| p.id != id);
             if g.active.as_deref() == Some(id) {
                 g.active = g.profiles.first().map(|p| p.id.clone());
             }
-        }
-        let _ = self.save(app);
+            Ok(())
+        })
     }
 
-    pub fn set_active(&self, app: &AppHandle, id: Option<String>) {
-        self.inner.lock().active = id;
-        let _ = self.save(app);
+    pub fn set_active(&self, app: &AppHandle, id: Option<String>) -> Result<(), String> {
+        self.with(app, |g| {
+            if id.as_ref().is_some_and(|id| !g.profiles.iter().any(|p| &p.id == id)) { return Err("Профиль не найден".into()); }
+            g.active = id;
+            Ok(())
+        })
     }
 
     /// The id of the profile after the active one (wrapping). None if < 2 profiles.
@@ -313,7 +301,7 @@ impl ProfileStore {
         let g = self.inner.lock();
         let p = g.profiles.iter().find(|p| p.id == id)?;
         let mut ob = p.outbound.clone();
-        ob["tag"] = Value::from(tag);
+        ob.as_object_mut()?.insert("tag".into(), Value::from(tag));
         Some(ob)
     }
 
@@ -323,9 +311,31 @@ impl ProfileStore {
         let active = g.active.as_ref()?;
         let p = g.profiles.iter().find(|p| &p.id == active)?;
         let mut ob = p.outbound.clone();
-        ob["tag"] = Value::from("proxy");
+        ob.as_object_mut()?.insert("tag".into(), Value::from("proxy"));
         Some(ob)
     }
+}
+
+/// Display names and generated tags do not identify a manual outbound.
+fn same_outbound(left: &Value, right: &Value) -> bool {
+    let (Some(mut left), Some(mut right)) = (left.as_object().cloned(), right.as_object().cloned()) else { return false };
+    left.remove("tag");
+    right.remove("tag");
+    left == right
+}
+
+fn append_manual(profiles: &mut Vec<Profile>, parsed: Vec<Profile>) -> (Vec<Profile>, usize) {
+    let mut added = Vec::new();
+    let mut skipped = 0;
+    for profile in parsed {
+        if profiles.iter().any(|old| old.subscription.is_none() && same_outbound(&old.outbound, &profile.outbound)) {
+            skipped += 1;
+        } else {
+            profiles.push(profile.clone());
+            added.push(profile);
+        }
+    }
+    (added, skipped)
 }
 
 fn now() -> u64 {
@@ -338,6 +348,35 @@ fn now() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn repeated_manual_import_skips_renames_and_keeps_subscription_profiles() {
+        let mut subscription = links::parse_many("vless://u@a.invalid:443#subscription").0.remove(0);
+        subscription.subscription = Some("sub".into());
+        let mut profiles = vec![subscription];
+        let first = links::parse_many("vless://u@a.invalid:443#first\nvless://u@a.invalid:443#renamed").0;
+        let (added, skipped) = append_manual(&mut profiles, first);
+        assert_eq!((added.len(), skipped, profiles.len()), (1, 1, 2));
+        let active_id = profiles[1].id.clone();
+        let (added, skipped) = append_manual(&mut profiles, links::parse_many("vless://u@a.invalid:443#third").0);
+        assert!(added.is_empty());
+        assert_eq!(skipped, 1);
+        assert_eq!(profiles[1].id, active_id);
+        assert_eq!(profiles[0].subscription.as_deref(), Some("sub"));
+        let (added, skipped) = append_manual(&mut profiles, links::parse_many("vless://different@a.invalid:443#different").0);
+        assert_eq!((added.len(), skipped), (1, 0));
+    }
+
+    #[test]
+    fn manual_identity_ignores_only_generated_tag() {
+        let a = serde_json::json!({"type":"vless", "server":"a.invalid", "uuid":"one", "tag":"a"});
+        let mut b = a.clone();
+        b["tag"] = "b".into();
+        assert!(same_outbound(&a, &b));
+        b["uuid"] = "two".into();
+        assert!(!same_outbound(&a, &b));
+        assert!(!same_outbound(&Value::Null, &Value::Null));
+    }
 
     fn store() -> ProfileStore {
         let profiles = links::parse_many("vless://u@a.invalid:443#a\ntrojan://p@b.invalid:443#b").0;

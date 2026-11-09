@@ -135,13 +135,13 @@ pub async fn subscription_update(app: AppHandle, id: String) -> ImportResult {
 }
 
 #[tauri::command]
-pub fn subscription_remove(app: AppHandle, store: State<'_, ProfileStore>, id: String) {
-    store.remove_subscription(&app, &id);
+pub fn subscription_remove(app: AppHandle, store: State<'_, ProfileStore>, id: String) -> Result<(), String> {
+    store.remove_subscription(&app, &id)
 }
 
 #[tauri::command]
-pub fn profiles_remove(app: AppHandle, store: State<'_, ProfileStore>, id: String) {
-    store.remove(&app, &id);
+pub fn profiles_remove(app: AppHandle, store: State<'_, ProfileStore>, id: String) -> Result<(), String> {
+    store.remove(&app, &id)
 }
 
 /// TCP-connect latency to a profile's server (ms), or null if unreachable.
@@ -150,8 +150,8 @@ pub fn profiles_set_active(
     app: AppHandle,
     store: State<'_, ProfileStore>,
     id: Option<String>,
-) {
-    store.set_active(&app, id);
+) -> Result<(), String> {
+    store.set_active(&app, id)
 }
 
 // ---- routing ----
@@ -166,18 +166,18 @@ pub fn routing_set_config(
     app: AppHandle,
     store: State<'_, RoutingStore>,
     config: RoutingConfig,
-) {
-    store.set_config(&app, config);
+) -> Result<(), String> {
+    store.set_config(&app, config)
 }
 
 #[tauri::command]
-pub fn service_upsert(app: AppHandle, store: State<'_, RoutingStore>, service: Service) {
-    store.upsert_service(&app, service);
+pub fn service_upsert(app: AppHandle, store: State<'_, RoutingStore>, service: Service) -> Result<(), String> {
+    store.upsert_service(&app, service)
 }
 
 #[tauri::command]
-pub fn service_remove(app: AppHandle, store: State<'_, RoutingStore>, id: String) {
-    store.remove_service(&app, &id);
+pub fn service_remove(app: AppHandle, store: State<'_, RoutingStore>, id: String) -> Result<(), String> {
+    store.remove_service(&app, &id)
 }
 
 /// Open an https:// link in the user's browser. On Windows through explorer.exe: the
@@ -310,16 +310,12 @@ pub fn settings_get(store: State<'_, SettingsStore>) -> Settings {
 
 #[tauri::command]
 pub fn settings_set(app: AppHandle, store: State<'_, SettingsStore>, mut settings: Settings) -> Result<(), String> {
-    // The geo-download inbound uses port + 1, so the top port is reserved.
-    if !(1024..=65534).contains(&settings.proxy_port) {
-        return Err("Порт прокси должен быть от 1024 до 65534".into());
-    }
+    ttcm_core::config::validate_ports(settings.proxy_port, 9090, cfg!(target_os = "linux"))?;
     settings.direct_interface = settings
         .direct_interface
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
-    store.set(&app, settings);
-    Ok(())
+    store.set(&app, settings)
 }
 
 /// Names of the system's network interfaces (for the direct-traffic interface choice).
@@ -361,6 +357,7 @@ pub async fn diag_run(app: AppHandle, targets: Option<Vec<String>>) -> DiagRepor
     }
     let input = DiagInput {
         server,
+        udp_only: app.state::<ProfileStore>().active_outbound().is_some_and(|o| o["type"] == "hysteria2"),
         core_running,
         targets,
     };

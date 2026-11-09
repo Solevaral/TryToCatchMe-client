@@ -1,6 +1,6 @@
 import { useCallback } from "react";
 import { useAppStore } from "../store/appStore";
-import { coreStart, coreStop, coreRestart, traySetState } from "../api/backend";
+import { coreStart, coreStop, coreRestart, traySetState, coreStatus } from "../api/backend";
 
 /** Turn whatever `invoke` rejected with into readable text. */
 export function errorText(e: unknown): string {
@@ -39,8 +39,9 @@ export function useConnection() {
     setLastError(null);
     try {
       await coreStart();
-      setStatus("connected");
-      await traySetState("connected").catch(() => {});
+      const actual = await coreStatus();
+      setStatus(actual.vpn ? "connected" : "disconnected");
+      await traySetState(actual.vpn ? "connected" : "idle").catch(() => {});
     } catch (e) {
       await fail(e);
     }
@@ -48,7 +49,7 @@ export function useConnection() {
 
   // No "connecting" guard: Disconnect must also abort a connect that hangs.
   const disconnect = useCallback(async () => {
-    setStatus("disconnected");
+    setStatus("connecting");
     setLastError(null);
     try {
       await coreStop();
@@ -65,8 +66,9 @@ export function useConnection() {
     setLastError(null);
     try {
       await coreRestart();
-      setStatus("connected");
-      await traySetState("connected").catch(() => {});
+      const actual = await coreStatus();
+      setStatus(actual.vpn ? "connected" : "disconnected");
+      await traySetState(actual.vpn ? "connected" : "idle").catch(() => {});
     } catch (e) {
       await fail(e);
     }

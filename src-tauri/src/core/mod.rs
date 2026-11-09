@@ -36,7 +36,7 @@ pub struct CoreState {
     /// Serializes start / stop / restart / apply: the UI, the tray, the startup tunnel
     /// and the watchdogs can all ask at once, and two interleaved starts left two cores
     /// fighting over the ports ("9090 занят"). Re-entrant: restart = stop + start.
-    op: ReentrantMutex<()>,
+    pub(crate) op: ReentrantMutex<()>,
     /// Coalesces `apply` calls that pile up behind `op`.
     applies: ApplyQueue,
 }
@@ -81,6 +81,14 @@ impl ApplyQueue {
 #[derive(Default)]
 struct Inner {
     child: Option<Child>,
+    started: Option<Instant>,
+    profile_name: Option<String>,
+    applied_vpn: bool,
+    tun: bool,
+    tun_up: Option<bool>,
+    capture_up: Option<(bool, Instant)>,
+    health: Option<(bool, Instant)>,
+    generation: u64,
 }
 
 #[derive(Serialize, Clone)]
@@ -89,6 +97,13 @@ pub struct CoreStatus {
     pub pid: Option<u32>,
     /// The VPN is on (the core may also run for a WireGuard tunnel alone).
     pub vpn: bool,
+    pub health: Option<bool>,
+    pub checked_ago: Option<u64>,
+    pub uptime: Option<u64>,
+    pub profile_name: Option<String>,
+    pub tun: bool,
+    pub tun_up: Option<bool>,
+    pub capture_up: Option<bool>,
 }
 
 /// Bring the core in line with what's switched on: the VPN and/or the built-in WireGuard
@@ -214,7 +229,14 @@ impl CoreState {
         CoreStatus {
             running,
             pid: g.child.as_ref().map(|c| c.id()),
-            vpn: running && self.vpn.load(Ordering::SeqCst),
+            vpn: running && g.applied_vpn,
+            health: if running { fresh_result(g.health.map(|(ok, t)| (ok, t.elapsed().as_secs())), 45) } else { None },
+            checked_ago: g.health.map(|(_, t)| t.elapsed().as_secs()),
+            uptime: if running { g.started.map(|t| t.elapsed().as_secs()) } else { None },
+            profile_name: if running { g.profile_name.clone() } else { None },
+            tun: running && g.tun,
+            tun_up: if running { g.tun_up } else { None },
+            capture_up: if running { fresh_result(g.capture_up.map(|(ok, t)| (ok, t.elapsed().as_secs())), 15) } else { None },
         }
     }
 
@@ -249,6 +271,7 @@ impl CoreState {
             None => app_log(app, "Профиль не выбран — весь трафик пойдёт напрямую".to_string()),
         }
         let settings = app.state::<crate::settings::SettingsStore>().get();
+        if vpn && proxy_outbound.is_none() { return Err("Выберите доступный профиль перед подключением".into()); }
         let tun = settings.capture_tun;
         let port = settings.proxy_port;
 
@@ -555,7 +578,18 @@ impl CoreState {
             Err(e) => return Err(e),
         }
         app_log(app, "Ядро запущено".to_string());
+        {
+            let mut g = self.inner.lock();
+            g.started = Some(Instant::now());
+            g.profile_name = if vpn { profiles.active_name() } else { None };
+            g.applied_vpn = vpn;
+            g.tun = tun;
+            g.tun_up = None;
+            g.capture_up = None;
+            g.health = None;
+        }
         self.expected.store(true, Ordering::SeqCst);
+        app.state::<WgState>().set_runtime(settings.wg_direct_via_tunnel || (settings.wg_vpn_over_tunnel && proxy_outbound.is_some()), port);
         app.state::<WgState>().set_applied(wg_tunnel.as_ref().map(|t| t.id.clone()));
 
         // The app — not sing-box — owns the OS system proxy (see crate::sysproxy).
@@ -706,8 +740,24 @@ impl CoreState {
 
     /// Stop then start with a freshly generated config (apply routing changes).
     pub fn restart(&self, app: &AppHandle) -> Result<(), String> {
-        self.stop(app)?;
-        self.start(app)
+        serialized_restart(&self.op, || self.stop(app), || self.start(app))
+    }
+
+    pub fn record_health(&self, app: &AppHandle, ok: bool) {
+        if !self.vpn_connected() { return; }
+        self.inner.lock().health = Some((ok, Instant::now()));
+        let status = self.status();
+        crate::tray::set_state(app, if status.vpn { if ok { "connected" } else { "degraded" } } else { "idle" });
+        let _ = app.emit("core://status", status);
+    }
+
+    pub fn refresh_capture(&self, app: &AppHandle) {
+        let status = self.status();
+        if !status.running { return; }
+        let up = if status.tun { crate::platform::tun_is_up() } else { app.state::<SysProxyState>().status().ours };
+        let mut g = self.inner.lock();
+        g.capture_up = Some((up, Instant::now()));
+        g.tun_up = if status.tun { Some(up) } else { None };
     }
 
     pub fn set_vpn(&self, on: bool) {
@@ -716,7 +766,7 @@ impl CoreState {
 
     /// The VPN is on and the core is up (what "Подключено" means in the UI and tray).
     pub fn vpn_connected(&self) -> bool {
-        self.vpn.load(Ordering::SeqCst) && self.status().running
+        self.status().vpn
     }
 
     /// Stop the core and give the system proxy back. On Windows sing-box is hard-killed
@@ -725,6 +775,7 @@ impl CoreState {
     pub fn stop(&self, app: &AppHandle) -> Result<(), String> {
         let _op = self.op.lock();
         self.expected.store(false, Ordering::SeqCst);
+        { let mut g = self.inner.lock(); g.generation += 1; g.health = None; g.tun_up = None; }
         app.state::<WgState>().set_applied(None);
         let killed = {
             let mut g = self.inner.lock();
@@ -761,23 +812,33 @@ fn warm_up(app: &AppHandle, pinned_tags: Vec<String>, hy2_server: Option<String>
             let _ = crate::diag::clash_delay_via(&tag, "http://www.gstatic.com/generate_204", 15000);
         });
     }
+    let generation = app.state::<CoreState>().inner.lock().generation;
     let app = app.clone();
     std::thread::spawn(move || {
         let _ = app.emit("vpn://warm", "start".to_string());
         let started = Instant::now();
         let deadline = started + Duration::from_secs(30);
         while Instant::now() < deadline {
+            if app.state::<CoreState>().inner.lock().generation != generation { return; }
             if !app.state::<CoreState>().status().running {
                 let _ = app.emit("vpn://warm", "done".to_string());
                 return;
             }
             if crate::diag::clash_delay("http://www.gstatic.com/generate_204", 8000).is_some() {
+                let core = app.state::<CoreState>();
+                let _op = core.op.lock();
+                if core.inner.lock().generation != generation { return; }
+                core.record_health(&app, true);
                 app_log(&app, format!("Туннель готов (прогрев {:.1} с)", started.elapsed().as_secs_f32()));
                 let _ = app.emit("vpn://warm", "done".to_string());
                 return;
             }
             std::thread::sleep(Duration::from_millis(500));
         }
+        let core = app.state::<CoreState>();
+        let _op = core.op.lock();
+        if core.inner.lock().generation != generation { return; }
+        core.record_health(&app, false);
         let _ = app.emit("vpn://warm", "fail".to_string());
         let hint = if hy2_server.is_some() {
             " Сервер Hysteria2 работает по UDP: провайдер или zapret могут его резать — попробуйте сервер VLESS."
@@ -1054,3 +1115,69 @@ pub(crate) fn no_window(cmd: &mut Command) {
 
 #[cfg(not(windows))]
 pub(crate) fn no_window(_cmd: &mut Command) {}
+
+/// Keep the operation guard alive across both halves, including failures.
+fn serialized_restart(
+    operation: &ReentrantMutex<()>,
+    stop: impl FnOnce() -> Result<(), String>,
+    start: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String> {
+    let _operation = operation.lock();
+    stop()?;
+    start()
+}
+
+#[cfg(test)]
+mod lifecycle_tests {
+    use super::*;
+
+    #[test]
+    fn restart_excludes_another_operation_between_stop_and_start() {
+        let operation = Arc::new(ReentrantMutex::new(()));
+        let other = operation.clone();
+        let (probe, ready) = std::sync::mpsc::channel();
+        let (answer, result) = std::sync::mpsc::channel();
+        let thread = std::thread::spawn(move || {
+            for _ in 0..2 {
+                ready.recv().unwrap();
+                answer.send(other.try_lock().is_none()).unwrap();
+            }
+        });
+        let stage = std::cell::Cell::new(0);
+        serialized_restart(&operation, || {
+            stage.set(1);
+            probe.send(()).unwrap();
+            assert!(result.recv().unwrap());
+            Ok(())
+        }, || {
+            assert_eq!(stage.get(), 1);
+            probe.send(()).unwrap();
+            assert!(result.recv().unwrap());
+            stage.set(2);
+            Ok(())
+        }).unwrap();
+        thread.join().unwrap();
+        assert_eq!(stage.get(), 2);
+        assert!(operation.try_lock().is_some());
+    }
+
+    #[test]
+    fn stale_or_missing_checks_never_confirm_connectivity() {
+        assert_eq!(fresh_result(None, 45), None);
+        assert_eq!(fresh_result(Some((true, 44)), 45), Some(true));
+        assert_eq!(fresh_result(Some((false, 44)), 45), Some(false));
+        assert_eq!(fresh_result(Some((true, 45)), 45), None);
+        assert_eq!(fresh_result(Some((true, 15)), 15), None);
+    }
+
+    #[test]
+    fn failed_stop_does_not_start_and_releases_operation() {
+        let operation = ReentrantMutex::new(());
+        assert!(serialized_restart(&operation, || Err("stop".into()), || panic!("must not start")).is_err());
+        assert!(operation.try_lock().is_some());
+    }
+}
+
+fn fresh_result(result: Option<(bool, u64)>, max_age: u64) -> Option<bool> {
+    result.filter(|(_, age)| *age < max_age).map(|(ok, _)| ok)
+}

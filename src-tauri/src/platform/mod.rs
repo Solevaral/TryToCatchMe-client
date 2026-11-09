@@ -152,3 +152,19 @@ fn process_names() -> Vec<String> {
     let Ok(out) = std::process::Command::new("ps").args(["-eo", "comm="]).output() else { return Vec::new() };
     String::from_utf8_lossy(&out.stdout).lines().map(|l| l.trim().to_string()).collect()
 }
+
+/// Read-only capture check. The configured TUN address must belong to an up adapter.
+pub fn tun_is_up() -> bool {
+    // Binding succeeds only while the address is assigned to a local interface: no
+    // PowerShell spawn every few seconds.
+    if std::net::UdpSocket::bind("172.18.0.1:0").is_err() {
+        return false;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let flags = std::fs::read_to_string(format!("/sys/class/net/{}/flags", ttcm_core::config::TUN_IFACE_LINUX)).unwrap_or_default();
+        let flags = u32::from_str_radix(flags.trim().trim_start_matches("0x"), 16).unwrap_or(0);
+        if flags & 1 == 0 { return false; }
+    }
+    true
+}

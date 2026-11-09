@@ -6,10 +6,12 @@ import {
   isHosted,
   networkInterfaces,
   settingsGet,
-  settingsSet,
+  settingsPatch,
   type Settings,
 } from "../api/backend";
 import ListEditor from "../components/ListEditor";
+import { useFreshData } from "../hooks/useFreshData";
+import { useAppStore } from "../store/appStore";
 
 const IS_LINUX = navigator.userAgent.includes("Linux");
 
@@ -22,7 +24,7 @@ export default function SettingsPage() {
 
   function loadIfaces() {
     setIfaces(null);
-    networkInterfaces().then(setIfaces).catch(() => setIfaces([]));
+    networkInterfaces().then(setIfaces).catch((e) => { setIfaces([]); useAppStore.getState().setLastError(String(e)); });
   }
 
   useEffect(() => {
@@ -32,6 +34,11 @@ export default function SettingsPage() {
     settingsGet().then(setSettings).catch(() => setSettings(null));
     loadIfaces();
   }, []);
+
+  useFreshData(async () => {
+    try { setSettings(await settingsGet()); setAutostart(await isEnabled()); loadIfaces(); }
+    catch (e) { useAppStore.getState().setLastError(String(e)); }
+  }, ["settings://changed"]);
 
   async function toggleAutostart() {
     try {
@@ -43,7 +50,7 @@ export default function SettingsPage() {
         setAutostart(true);
       }
     } catch (e) {
-      console.error(e);
+      useAppStore.getState().setLastError(String(e));
     }
   }
 
@@ -62,8 +69,8 @@ export default function SettingsPage() {
       await writeText(text);
       setCopied(kind);
       setTimeout(() => setCopied(""), 1500);
-    } catch {
-      /* ignore */
+    } catch (e) {
+      useAppStore.getState().setLastError(String(e));
     }
   }
 
@@ -76,19 +83,19 @@ export default function SettingsPage() {
 
   async function patch(p: Partial<Settings>) {
     if (!settings) return;
-    const next = { ...settings, ...p };
-    await settingsSet(next);
-    setSettings(next);
+    try { setSettings(await settingsPatch(p)); }
+    catch (e) { useAppStore.getState().setLastError(String(e)); }
   }
 
   async function savePort() {
     const port = Number(portDraft);
-    if (!Number.isInteger(port) || port < 1024 || port > 65534) {
-      setPortMsg({ ok: false, text: "Порт должен быть целым числом от 1024 до 65534" });
+    const max = IS_LINUX ? 65533 : 65534;
+    if (!Number.isInteger(port) || port < 1024 || port > max) {
+      setPortMsg({ ok: false, text: `Порт должен быть целым числом от 1024 до ${max}` });
       return;
     }
     try {
-      await patch({ proxy_port: port });
+      setSettings(await settingsPatch({ proxy_port: port }));
       setPortMsg({ ok: true, text: "Сохранено — применится при следующем подключении (или «Перезапустить VPN»)" });
     } catch (e) {
       setPortMsg({ ok: false, text: String(e) });
@@ -189,7 +196,7 @@ export default function SettingsPage() {
                 {settings.direct_interface && !ifaces?.includes(settings.direct_interface) && (
                   <option value={settings.direct_interface}>
                     {settings.direct_interface}
-                    {ifaces ? " (сейчас нет в системе)" : ""}
+                    {ifaces ? " (нет в полученном списке)" : ""}
                   </option>
                 )}
                 {(ifaces ?? []).map((name) => (

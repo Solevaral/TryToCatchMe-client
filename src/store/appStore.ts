@@ -11,6 +11,9 @@ export type Page =
   | "settings";
 
 interface AppState {
+  diagnosticsRequested: boolean;
+  requestDiagnostics: () => void;
+  consumeDiagnostics: () => void;
   page: Page;
   setPage: (p: Page) => void;
 
@@ -21,6 +24,7 @@ interface AppState {
   setActiveProfile: (id: string | null) => void;
 
   // live traffic (bytes/s)
+  lastTrafficAt: number;
   up: number;
   down: number;
   setTraffic: (up: number, down: number) => void;
@@ -35,6 +39,9 @@ interface AppState {
 }
 
 export const useAppStore = create<AppState>((set) => ({
+  diagnosticsRequested: false,
+  requestDiagnostics: () => set({ diagnosticsRequested: true }),
+  consumeDiagnostics: () => set({ diagnosticsRequested: false }),
   page: "profiles",
   setPage: (page) => set({ page }),
 
@@ -44,9 +51,10 @@ export const useAppStore = create<AppState>((set) => ({
   activeProfileId: null,
   setActiveProfile: (activeProfileId) => set({ activeProfileId }),
 
+  lastTrafficAt: 0,
   up: 0,
   down: 0,
-  setTraffic: (up, down) => set({ up, down }),
+  setTraffic: (up, down) => set({ up, down, lastTrafficAt: Date.now() }),
 
   lastError: null,
   setLastError: (lastError) => set({ lastError }),

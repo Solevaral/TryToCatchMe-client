@@ -123,7 +123,7 @@ async fn update(app: &AppHandle, vpn_port: Option<u16>) -> Result<(usize, SyncRe
                 let tmp = path.with_extension("json.tmp");
                 fs::write(&tmp, body).map_err(|e| format!("не удалось записать: {e}"))?;
                 fs::rename(&tmp, &path).map_err(|e| format!("не удалось записать: {e}"))?;
-                let report = app.state::<RoutingStore>().sync_library(app, &list);
+                let report = app.state::<RoutingStore>().sync_library(app, &list)?;
                 return Ok((list.len(), report));
             }
             Err(e) => last_error = e,
@@ -162,7 +162,10 @@ pub fn schedule(app: &AppHandle, vpn_port: Option<u16>) {
         // older version that didn't sync them).
         let list = cached(app);
         if !list.is_empty() {
-            let report = app.state::<RoutingStore>().sync_library(app, &list);
+            let report = match app.state::<RoutingStore>().sync_library(app, &list) {
+                Ok(report) => report,
+                Err(e) => { let _ = app.emit("app://error", e); return; }
+            };
             if let Some(changes) = describe(&report) {
                 let _ = app.emit("app://log", format!("Сервисы обновлены из библиотеки: {changes}"));
             }

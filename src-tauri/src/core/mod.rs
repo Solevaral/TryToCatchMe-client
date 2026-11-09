@@ -305,7 +305,14 @@ impl CoreState {
         }
         let antifilter_ready = plan.antifilter && crate::geo::all_present(app, &antifilter_files());
         let geo_input = GeoInput { dir: &geo_dir, region_ready, geosites: &service_ready, antifilter_ready };
-        let spec = routing.route_spec(Some(&geo_input));
+        let mut spec = routing.route_spec(Some(&geo_input));
+        let proxy_list_missing = (plan.antifilter && !antifilter_ready)
+            || plan.proxy_geosites.iter().any(|g| !service_ready.contains(g));
+        let safe_final = ttcm_core::routing::final_while_lists_missing(&spec.final_action, proxy_outbound.is_some(), proxy_list_missing);
+        if safe_final != spec.final_action {
+            app_log(app, "Списки для VPN ещё не скачаны — до их загрузки весь остальной трафик тоже идёт через VPN, чтобы ничего не ушло мимо".to_string());
+            spec.final_action = safe_final.to_string();
+        }
 
         // Services pinned to other profiles get their own outbounds.
         let active_id = profiles.active_id();

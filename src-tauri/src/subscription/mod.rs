@@ -98,6 +98,18 @@ async fn fetch_once(app: &AppHandle, url: &str, proxy: Option<&str>) -> Result<F
 /// Download a subscription. `vpn_port` = the local proxy port while connected: the
 /// panel's domain may be blocked, so it goes through the VPN first, then directly.
 pub async fn fetch(app: &AppHandle, url: &str, vpn_port: Option<u16>) -> Result<Fetched, String> {
+    if ttcm_core::subscription::needs_tunnel(url) {
+        // Unencrypted: never fetch it past the VPN, where the ISP could swap the servers.
+        let Some(port) = vpn_port else {
+            return Err("Подписка по http без шифрования: провайдер может подменить в ней серверы. \
+                        Подключитесь к VPN (тогда она загрузится через туннель) или попросите https-ссылку."
+                .into());
+        };
+        let proxy = format!("http://{MIXED_LISTEN}:{}", geo_port(port));
+        return fetch_once(app, url, Some(&proxy))
+            .await
+            .map_err(|e| format!("через VPN: {e} (напрямую http-подписку не загружаю: её могут подменить)"));
+    }
     if let Some(port) = vpn_port {
         // The geo-download inbound always goes through the proxy, whatever the routing.
         let proxy = format!("http://{MIXED_LISTEN}:{}", geo_port(port));

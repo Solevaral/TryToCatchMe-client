@@ -485,9 +485,26 @@ fn sanitize_kind(k: &str) -> String {
     .to_string()
 }
 
+/// Fail closed while lists that send traffic THROUGH the VPN are not downloaded yet:
+/// their domains would otherwise fall through to a `direct` final and leak past the VPN.
+/// Over-proxying for a minute is the safe side; the core restarts once lists arrive.
+pub fn final_while_lists_missing(final_action: &str, has_proxy: bool, proxy_list_missing: bool) -> &str {
+    if has_proxy && proxy_list_missing && final_action == "direct" { "proxy" } else { final_action }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn missing_proxy_lists_fail_closed() {
+        assert_eq!(final_while_lists_missing("direct", true, true), "proxy");
+        assert_eq!(final_while_lists_missing("direct", true, false), "direct");
+        // No proxy to send it to, or the final already is the VPN / a block.
+        assert_eq!(final_while_lists_missing("direct", false, true), "direct");
+        assert_eq!(final_while_lists_missing("proxy", true, true), "proxy");
+        assert_eq!(final_while_lists_missing("block", true, true), "block");
+    }
 
     #[test]
     fn grouping_preserves_first_match_precedence() {

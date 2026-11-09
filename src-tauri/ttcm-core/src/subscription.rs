@@ -29,6 +29,21 @@ pub fn as_url(text: &str) -> Option<String> {
     (matches!(url.scheme(), "http" | "https") && url.host_str().is_some()).then(|| t.to_string())
 }
 
+/// Plain `http://` to a host outside the LAN: anyone on the path (the ISP) can swap the
+/// servers in it. Such a subscription is fetched only through the VPN, never directly.
+pub fn needs_tunnel(url: &str) -> bool {
+    let Ok(u) = Url::parse(url.trim()) else { return false };
+    if u.scheme() != "http" {
+        return false;
+    }
+    match u.host() {
+        Some(url::Host::Ipv4(ip)) => !(ip.is_private() || ip.is_loopback() || ip.is_link_local()),
+        Some(url::Host::Ipv6(ip)) => !(ip.is_loopback() || (ip.segments()[0] & 0xfe00) == 0xfc00 || (ip.segments()[0] & 0xffc0) == 0xfe80),
+        Some(url::Host::Domain(d)) => !d.eq_ignore_ascii_case("localhost"),
+        None => false,
+    }
+}
+
 /// `upload=0; download=123; total=0; expire=1808933689`
 pub fn parse_userinfo(header: &str) -> Option<SubInfo> {
     let mut info = SubInfo::default();
@@ -101,6 +116,18 @@ pub fn parse_body(body: &str) -> (Vec<Profile>, Vec<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn plain_http_to_public_hosts_needs_the_tunnel() {
+        assert!(needs_tunnel("http://1.2.3.4:2096/sub/x"));
+        assert!(needs_tunnel("HTTP://panel.example.com/sub"));
+        assert!(!needs_tunnel("https://panel.example.com/sub"));
+        assert!(!needs_tunnel("http://192.168.1.10:2096/sub"));
+        assert!(!needs_tunnel("http://127.0.0.1:8080/sub"));
+        assert!(!needs_tunnel("http://localhost/sub"));
+        assert!(!needs_tunnel("http://[fd00::1]/sub"));
+        assert!(needs_tunnel("http://[2001:db8::1]/sub"));
+    }
 
     #[test]
     fn unknown_userinfo_fields_do_not_invent_zero_usage() {

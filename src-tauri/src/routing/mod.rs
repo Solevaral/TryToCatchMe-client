@@ -243,8 +243,10 @@ fn migrate(p: &mut Persisted) -> bool {
 #[derive(Default, Clone)]
 pub struct RoutePlan {
     pub region: Option<String>,
-    /// Geosite lists backing enabled (non-direct) services, e.g. "google".
+    /// Geosite lists backing enabled services, e.g. "google".
     pub service_geosites: Vec<String>,
+    /// The subset of `service_geosites` whose traffic must go through the VPN.
+    pub proxy_geosites: Vec<String>,
     /// Profile ids that services are pinned to.
     pub pinned_profiles: Vec<String>,
     /// Antifilter mode with the lists on.
@@ -395,6 +397,9 @@ impl RoutingStore {
                 if let Some(g) = &svc.geosite {
                     if !plan.service_geosites.contains(g) {
                         plan.service_geosites.push(g.clone());
+                    }
+                    if sel.action == "proxy" && !plan.proxy_geosites.contains(g) {
+                        plan.proxy_geosites.push(g.clone());
                     }
                 }
                 if let Some(pid) = sel.profile.as_ref().filter(|pid| !pid.is_empty()) {

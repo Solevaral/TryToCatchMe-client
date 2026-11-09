@@ -7,9 +7,11 @@
 //! `direct` go to the local proxy, everything else connects directly, exactly as with
 //! the VPN off.
 //!
-//! Rules are evaluated in order, first match wins (like sing-box). Domain matchers need
-//! no DNS; IP matchers (ip_cidr, IP rule-sets) resolve the host, so they run only for
-//! hosts no earlier domain rule decided. `ip_is_private` is checked for IP literals
+//! Rules are evaluated in order, first match wins (like sing-box). The script never
+//! resolves names itself (`dnsResolve` would ask the ISP's DNS, past the VPN): IP
+//! matchers test IP literals only, and a domain reaching an IP rule that goes through
+//! the VPN is sent to the local proxy, where the core applies the full routing. The
+//! proxy entry has no `DIRECT` fallback, so a dead core never sends VPN traffic direct. `ip_is_private` is checked for IP literals
 //! only — a domain that resolves to a LAN address and lands in the proxy is still sent
 //! direct by the core itself.
 
@@ -48,8 +50,8 @@ pub fn parse_rule_set(text: &str) -> Result<RuleSetData, String> {
 
 const MATCHERS: [&str; 6] = ["domain", "domain_suffix", "domain_keyword", "ip_cidr", "rule_set", "ip_is_private"];
 
-/// IPv4 CIDRs as merged, sorted [start, end] pairs (IPv6 is skipped: PAC's
-/// dnsResolve returns IPv4).
+/// IPv4 CIDRs as merged, sorted [start, end] pairs (IPv6 is skipped: the script
+/// only parses IPv4 literals).
 fn ipv4_ranges(cidrs: &[String]) -> Vec<(u32, u32)> {
     let mut r: Vec<(u32, u32)> = cidrs
         .iter()
@@ -135,10 +137,10 @@ function priv(n){return n>>>24==10||n>>>24==127||n>>>20==0xAC1||n>>>16==0xC0A8||
 function FindProxyForURL(url,host){
  host=host.toLowerCase().replace(/\.$/,"");
  if(isPlainHostName(host))return "DIRECT";
- var lit=ip4(host),ip=lit,tried=lit!==null;
+ var lit=ip4(host);
  for(var i=0;i<R.length;i++){var x=R[i];
   if((x.d&&x.d[host])||(x.s&&sfx(x.s,host))||(x.k&&kw(x.k,host))||(x.p&&lit!==null&&priv(lit)))return x.o?P:"DIRECT";
-  if(x.r){if(!tried){tried=true;var a=dnsResolve(host);ip=a?ip4(a):null;}if(ip!==null&&inR(x.r,ip))return x.o?P:"DIRECT";}
+  if(x.r){if(lit!==null){if(inR(x.r,lit))return x.o?P:"DIRECT";}else if(x.o)return P;}
  }
  return F?P:"DIRECT";
 }
@@ -156,7 +158,7 @@ pub fn generate(rules: &[Value], final_action: &str, sets: &HashMap<String, Rule
     let rules_json = Value::Array(pac_rules.into_iter().map(|(_, v)| v).collect());
     format!(
         "// TryToCatchMe: hosts the routing sends through the VPN go to the local proxy, the rest directly.\nvar P={};\nvar F={};\nvar R={};{PAC_JS}",
-        json!(format!("PROXY {proxy}; DIRECT")), final_proxy as u8, rules_json
+        json!(format!("PROXY {proxy}")), final_proxy as u8, rules_json
     )
 }
 
@@ -177,11 +179,21 @@ mod tests {
     }
 
     #[test]
+    fn fails_closed_and_never_resolves_locally() {
+        let rules = [json!({ "ip_cidr": ["91.108.0.0/16"], "outbound": "proxy" })];
+        let pac = generate(&rules, "direct", &HashMap::new(), "127.0.0.1:2080");
+        assert!(!pac.contains("dnsResolve"), "a local lookup leaks the name to the ISP DNS");
+        assert!(pac.contains("var P=\"PROXY 127.0.0.1:2080\""), "no DIRECT fallback when the core is down");
+        // A domain hitting a VPN-bound IP rule goes to the proxy; the core decides.
+        assert!(pac.contains("else if(x.o)return P;"));
+    }
+
+    #[test]
     fn script_strings_are_json_escaped() {
         let proxy = "a\"b\\c:2080";
         let script = generate(&[json!({"domain": ["a\"b\\c.invalid"], "outbound": "proxy"})], "direct", &HashMap::new(), proxy);
         let encoded = script.lines().find_map(|l| l.strip_prefix("var P=")).unwrap().trim_end_matches(';');
-        assert_eq!(serde_json::from_str::<String>(encoded).unwrap(), format!("PROXY {proxy}; DIRECT"));
+        assert_eq!(serde_json::from_str::<String>(encoded).unwrap(), format!("PROXY {proxy}"));
         assert!(script.contains("a\\\"b\\\\c.invalid"));
     }
 
@@ -226,7 +238,7 @@ mod tests {
     #[test]
     fn pac_carries_proxied_rules_and_drops_trailing_direct() {
         let pac = generate(&rules(), "direct", &sets(), "127.0.0.1:2080");
-        assert!(pac.contains("var P=\"PROXY 127.0.0.1:2080; DIRECT\""));
+        assert!(pac.contains("var P=\"PROXY 127.0.0.1:2080\""));
         assert!(pac.contains("var F=0"));
         assert!(pac.contains("\"claude.ai\":1"));
         assert!(pac.contains("\"rutracker.org\":1"));

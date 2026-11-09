@@ -132,20 +132,14 @@ export default function App() {
         window.dispatchEvent(new CustomEvent("ttcm:run-diagnostics"));
       })
     );
-    // The core sends log lines in batches (one event per line floods the webview).
+    // Core log batches, already stripped of known-harmless noise by the backend (the same
+    // filter as the log file, so the page and the file agree).
     unlisteners.push(
-      listen<string>("clash://log", (e) => {
-        try {
-          const batch = JSON.parse(e.payload) as Array<{ type?: string; payload?: string }>;
-          useLogStore.getState().addMany(
-            (Array.isArray(batch) ? batch : [batch]).map((l) => ({
-              level: l.type ?? "info",
-              msg: l.payload ?? "",
-            }))
-          );
-        } catch {
-          useLogStore.getState().add("info", e.payload);
-        }
+      listen<Array<{ type?: string; payload?: string }>>("app://filtered-core-log", (e) => {
+        const batch = Array.isArray(e.payload) ? e.payload : [];
+        useLogStore.getState().addMany(
+          batch.map((l) => ({ level: l.type ?? "info", msg: l.payload ?? "" }))
+        );
       })
     );
     unlisteners.push(

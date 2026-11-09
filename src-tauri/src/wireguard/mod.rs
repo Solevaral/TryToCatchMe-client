@@ -34,6 +34,8 @@ pub struct WgState {
     health: Mutex<Option<(bool, Instant, String)>>,
     /// The host:port behind the tunnel that answered last: asked alone first next time.
     last_target: Mutex<Option<SocketAddr>>,
+    /// Destinations of the current reachability check, including its remembered target.
+    probe_targets: Mutex<Vec<SocketAddr>>,
 }
 
 impl WgState {
@@ -102,6 +104,11 @@ impl WgState {
         *self.applied.lock() = id;
         *self.health.lock() = None;
         *self.last_target.lock() = None;
+        self.probe_targets.lock().clear();
+    }
+
+    pub fn log_probe_targets(&self) -> Vec<SocketAddr> {
+        self.probe_targets.lock().clone()
     }
 
     /// Record a check through the tunnel (the watchdog's or the "check" button's);
@@ -331,6 +338,7 @@ pub fn check_tunnel(app: &AppHandle) -> Check {
         return Check { ok: Some(ok), text, internet };
     }
     let targets = wgprobe::probe_targets(&t);
+    *state.probe_targets.lock() = targets.clone();
     let port = state.runtime.lock().1;
     let proxy = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
     let first = *state.last_target.lock();
@@ -454,4 +462,25 @@ pub fn wg_migrate(app: AppHandle, store: State<'_, SettingsStore>) -> Result<(),
     // clearing them once sent all direct traffic past the user's VPN after a rollback.
     s.wg_migrated = true;
     store.set(&app, s)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn log_probe_targets_are_a_snapshot_cleared_on_core_restart() {
+        let state = WgState::default();
+        let target = "10.6.0.1:80".parse().unwrap();
+        assert!(state.log_probe_targets().is_empty());
+        state.probe_targets.lock().push(target);
+        let mut snapshot = state.log_probe_targets();
+        snapshot.clear();
+        assert_eq!(state.log_probe_targets(), [target]);
+        state.set_applied(Some("test-tunnel".into()));
+        assert!(state.log_probe_targets().is_empty());
+        state.probe_targets.lock().push(target);
+        state.set_applied(None);
+        assert!(state.log_probe_targets().is_empty());
+    }
 }

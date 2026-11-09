@@ -6,11 +6,11 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use parking_lot::Mutex;
-use tauri::{AppHandle, Listener, Manager};
-use ttcm_core::logfile::{lines_for_event, utc_stamp, MAX_BYTES};
+use tauri::{AppHandle, Emitter, Listener, Manager};
+use ttcm_core::logfile::{filter_core_entries, lines_for_event, utc_stamp, NoiseCounter, MAX_BYTES};
 
 struct Sink {
     path: PathBuf,
@@ -46,20 +46,52 @@ pub fn path(app: &AppHandle) -> Option<PathBuf> {
 
 /// Start writing the log file. Call once at startup.
 pub fn init(app: &AppHandle) {
-    let Some(path) = path(app) else { return };
-    if let Some(dir) = path.parent() {
-        let _ = fs::create_dir_all(dir);
-    }
-    let sink = std::sync::Arc::new(Mutex::new(Sink { path, file: None }));
-    sink.lock().write(&[format!("[app] ---- TryToCatchMe {} запущен ----", env!("CARGO_PKG_VERSION"))]);
+    // Filtering and accounting also work when the log directory is unavailable.
+    let sink = path(app).map(|path| {
+        if let Some(dir) = path.parent() {
+            let _ = fs::create_dir_all(dir);
+        }
+        let mut sink = Sink { path, file: None };
+        sink.write(&[format!("[app] ---- TryToCatchMe {} запущен ----", env!("CARGO_PKG_VERSION"))]);
+        std::sync::Arc::new(Mutex::new(sink))
+    });
+    let counter = std::sync::Arc::new(Mutex::new(NoiseCounter::new(0)));
     for event in ["app://log", "app://error", "clash://log"] {
         let sink = sink.clone();
+        let counter = counter.clone();
+        let app = app.clone();
+        let handle = app.clone();
         app.listen_any(event, move |e| {
             // Payloads are JSON-encoded strings.
             let payload: String = serde_json::from_str(e.payload()).unwrap_or_else(|_| e.payload().to_string());
-            sink.lock().write(&lines_for_event(event, &payload));
+            let payload = if event == "clash://log" {
+                let targets = handle.state::<crate::wireguard::WgState>().log_probe_targets();
+                let (entries, hidden) = filter_core_entries(&payload, &targets);
+                counter.lock().record(hidden);
+                if !entries.is_empty() {
+                    let _ = handle.emit("app://filtered-core-log", &entries);
+                }
+                serde_json::to_string(&entries).unwrap_or_default()
+            } else {
+                payload
+            };
+            if let Some(sink) = &sink {
+                sink.lock().write(&lines_for_event(event, &payload));
+            }
         });
     }
+    let handle = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let started = Instant::now();
+        loop {
+            tokio::time::sleep(Duration::from_secs(600)).await;
+            let summary = counter.lock().flush(started.elapsed().as_secs());
+            if let Some(summary) = summary {
+                // The app listener writes this once and forwards it to the log page.
+                let _ = handle.emit("app://log", summary);
+            }
+        }
+    });
 }
 
 #[cfg(test)]

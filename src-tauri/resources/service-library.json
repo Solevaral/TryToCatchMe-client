@@ -53,5 +53,6 @@
   {"id": "fandom", "name": "Fandom", "icon": "📖", "domains": ["fandom.com", "wikia.com", "wikia.org", "nocookie.net"], "ip_cidrs": []},
   {"id": "tiermaker", "name": "TierMaker", "icon": "🏆", "domains": ["tiermaker.com"], "ip_cidrs": []},
   {"id": "factorio", "name": "Factorio", "icon": "⚙️", "domains": ["factorio.com"], "ip_cidrs": []},
-  {"id": "eve-frontier-auth", "name": "EVE Frontier", "icon": "🚀", "domains": ["engine2.extccp.com", "evefrontier.com"], "ip_cidrs": ["13.248.184.148/32", "166.117.148.0/32"]}
+  {"id": "eve-frontier-auth", "name": "EVE Frontier", "icon": "🚀", "domains": ["engine2.extccp.com", "evefrontier.com"], "ip_cidrs": ["13.248.184.148/32", "166.117.148.0/32"]},
+  {"id":"telegram","name":"Telegram","icon":"✈️","domains":["telegram.org","t.me","telegram.me","telesco.pe","cdn-telegram.org"],"ip_cidrs":["91.108.56.0/22","91.108.4.0/22","91.108.8.0/22","91.108.16.0/22","91.108.12.0/22","149.154.160.0/20","91.105.192.0/23","91.108.20.0/22","185.76.151.0/24","2001:b28:f23d::/48","2001:b28:f23f::/48","2001:67c:4e8::/48","2001:b28:f23c::/48","2a0a:f280::/32"]}
 ]
